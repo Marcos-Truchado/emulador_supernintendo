@@ -1,0 +1,6 @@
+add_executable(snes_cputest cputest.cpp)
+target_include_directories(snes_cputest PRIVATE
+  ${CMAKE_SOURCE_DIR}/core/include
+  ${CMAKE_SOURCE_DIR}/core/src
+)
+target_link_libraries(snes_cputest PRIVATE snes_core)
