@@ -59,6 +59,9 @@ class Cartridge {
   auto hasCopierHeader() const -> bool;
   // size in bytes of the logical ROM (file minus copier header).
   auto romOffset(uint32 address) const -> uint32;  // mapped ROM offset, -1 if unmapped
+  // battery SRAM size in bytes, from the header RAM-size byte at $FFD8
+  // ((1 SHL n) Kbytes; 0 = no SRAM).
+  auto sramSize() const -> uint32;
 
  private:
   auto detect() -> void;
@@ -67,9 +70,13 @@ class Cartridge {
   bool hasHeader_ = false;
 };
 
-// Minimal LoROM bus: ROM + 128KB WRAM + MMIO stubs (enough to run the
-// community CPU test ROMs). PPU/APU/DMA registers are write-ignored;
-// $4210 returns an alternating vblank bit so wait_for_vblank terminates.
+// Full SNES memory map bus: LoROM/HiROM/ExHiROM routing, 128KB WRAM, SRAM,
+// and the base MMIO registers (CPU on-chip, PPU/APU stubs, WRAM port).
+// PPU/APU are not implemented yet (Phase 2): PPU registers are write-only
+// shadows, APU ports are plain storage, DMA registers are R/W storage for
+// Phase 5. Unmapped reads return open bus (the last byte on the data bus,
+// tracked in lastData_); $4210/$4211 alternate bit7 so wait_for_vblank loops
+// in the community CPU test ROMs terminate.
 class Bus : public Memory {
  public:
   explicit Bus(Cartridge& cartridge) : cartridge_(cartridge) {}
@@ -77,17 +84,51 @@ class Bus : public Memory {
   auto read(uint24 address) -> uint8 override;
   auto write(uint24 address, uint8 data) -> void override;
 
-  // direct WRAM access for test harnesses
+  // Power-on and soft-reset register values (fullsnes I/O map right column:
+  // bracketed values survive reset, only power-on sets them).
+  auto power() -> void;
+  auto reset() -> void;
+
+  // direct WRAM/SRAM access for test harnesses
   auto wram() -> std::vector<uint8>& { return wram_; }
   auto wram() const -> const std::vector<uint8>& { return wram_; }
+  auto sram() -> std::vector<uint8>& { return sram_; }
+  auto sram() const -> const std::vector<uint8>& { return sram_; }
+
+  // last byte on the data bus (what open-bus reads return)
+  auto openBus() const -> uint8 { return lastData_; }
+
+  // register readback for tests and later phases
+  auto ppuRegister(uint8 offset) const -> uint8;  // $2100-$2133 write shadows
+  auto apuPort(uint8 index) const -> uint8;       // $2140-$2143
+  auto cpuRegister(uint8 offset) const -> uint8;  // $4200-$420D write shadows
+  auto dmaRegister(uint8 offset) const -> uint8;  // $4300-$437B
+  auto wramAddress() const -> uint32;             // $2181-$2183 17-bit addr
 
  private:
   uint8 mmioRead(uint24 address);
-  uint8 romRead(uint24 address) const;
+  void mmioWrite(uint24 address, uint8 data);
+  void writeCpuRegister(uint8 offset, uint8 data);
+  uint8 romRead(uint24 address);
+  uint8 sramRead(uint32 offs, uint32 baseOffs);
+  void sramWrite(uint32 offs, uint32 baseOffs, uint8 data);
+  uint8 latch(uint8 value);  // put value on the data bus (open-bus tracking)
 
   Cartridge& cartridge_;
   std::vector<uint8> wram_ = std::vector<uint8>(128 * 1024);
-  bool vblankToggle_ = false;  // alternates $4210 bit7 per read
+  std::vector<uint8> sram_;
+  uint8 lastData_ = 0;
+  bool vblankToggle_ = false;  // alternates $4210/$4211 bit7 (Phase 2 stub)
+
+  uint8 ppuReg_[0x34] = {};  // $2100-$2133 write shadows
+  uint8 apuPort_[4] = {};    // $2140-$2143
+  uint8 cpuReg_[0x10] = {};  // $4200-$420D write shadows
+  uint8 dmaReg_[0x80] = {};  // $4300-$437B (8 channels x 16 bytes)
+  uint32 wramAddr_ = 0;      // $2181-$2183 17-bit WRAM port address
+  uint8 mpyA_ = 0xFF;        // $4202 multiplicand
+  uint16 divDividend_ = 0;   // $4204/$4205 dividend
+  uint16 divQuotient_ = 0;   // $4214/$4215 division quotient
+  uint16 mathResult_ = 0;    // $4216/$4217 product or remainder
 };
 
 // System facade: wires cartridge + bus + CPU, exposes step/run/reset.

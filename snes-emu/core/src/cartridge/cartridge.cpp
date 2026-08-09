@@ -19,26 +19,38 @@ static bool isExHiRomFamily(uint8 b) { return (b & 0x1F) == 0x02; }
 // when the address is outside the ROM windows of that mode.
 static uint32 offsetInFile(MapMode mode, uint24 address) {
   uint32 bank = address >> 16;
-  uint32 offs = address & 0x7FFF;  // $FFFF masked; ROM windows live at $8000-$FFFF
+  uint32 offs = address & 0xFFFF;
   switch (mode) {
     case MapMode::lorom:
+      // $00-3F/$80-BF:8000-FFFF -> 32KB windows.
       if (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF))
-        return ((bank & 0x3F) << 15) + offs;
-      if (bank >= 0x40 && bank <= 0x5F || (bank >= 0xC0 && bank <= 0xDF))
-        return ((bank & 0x1F) << 16) + (address & 0xFFFF);
+        return ((bank & 0x3F) << 15) + (address & 0x7FFF);
+      // $40-7D/$C0-FF:0000-FFFF -> full 64KB windows (linear; banks 40-5F
+      // mirror the first 2MB, 60-7D continue past it, per the standard
+      // LoROM decoder used by bsnes/Mesen-S).
+      if ((bank >= 0x40 && bank <= 0x7D) || (bank >= 0xC0 && bank <= 0xFF))
+        return ((bank & 0x3F) << 16) + offs;
       return -1;
     case MapMode::hirom:
       if (bank == 0x7E || bank == 0x7F) return -1;
-      if (bank <= 0x3F)  // 00-3F: mirrors the top 32KB of banks 40-7D at +$8000
-        return 0x400000 + (bank << 16) + (address & 0xFFFF) - 0x8000;
-      if (bank >= 0x40 && bank <= 0x7D)  // longbanks 40-7D: full 64KB windows
-        return ((bank & 0x3F) << 16) + (address & 0xFFFF);
-      if (bank >= 0xC0)  // mirror of 40-7D
-        return (((bank - 0xC0 + 0x40) & 0x3F) << 16) + (address & 0xFFFF);
+      // $00-3F/$80-BF:8000-FFFF -> mirrors of $40-7D:0000-7FFF.
+      if (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF))
+        return 0x400000 + ((bank & 0x3F) << 16) + (address & 0x7FFF);
+      // $40-7D:0000-FFFF -> full 64KB windows; $C0-FF mirrors them.
+      if (bank >= 0x40 && bank <= 0x7D)
+        return ((bank & 0x3F) << 16) + offs;
+      if (bank >= 0xC0)
+        return (((bank - 0x40) & 0x3F) << 16) + offs;
       return -1;
     case MapMode::exhirom:
-      if (bank >= 0xC0)  // only full 64KB windows in C0-FF
-        return ((bank - 0xC0) << 16) + (address & 0xFFFF);
+      // $40-7D:0000-FFFF -> first 4MB; $C0-FF -> next 4MB; system banks
+      // $00-3F/$80-BF:8000-FFFF mirror the $40-7D windows.
+      if (bank >= 0x40 && bank <= 0x7D)
+        return ((bank & 0x3F) << 16) + offs;
+      if (bank >= 0xC0)
+        return 0x400000 + ((bank - 0xC0) << 16) + offs;
+      if (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF))
+        return ((bank & 0x3F) << 16) + (address & 0x7FFF);
       return -1;
     default:
       return -1;
@@ -83,11 +95,24 @@ const std::vector<uint8>& Cartridge::rom() const { return data_; }
 uint32 Cartridge::romSize() const { return uint32(data_.size()); }
 bool Cartridge::hasCopierHeader() const { return hasHeader_; }
 
+uint32 Cartridge::sramSize() const {
+  // Header RAM-size byte at $FFD8 in the map mode's header window:
+  // (1 SHL n) Kbytes, n in bits 2-0 (fullsnes cartridge header). 0 = no SRAM.
+  uint32 pos = mapMode_ == MapMode::lorom     ? 0x7FD8
+               : mapMode_ == MapMode::hirom   ? 0xFFD8
+               : mapMode_ == MapMode::exhirom ? 0x40FFD8
+                                              : uint32(-1);
+  if (pos == uint32(-1) || pos >= data_.size()) return 0;
+  uint8 n = data_[pos] & 0x07;
+  return n ? uint32(1) << (n + 10) : 0;
+}
+
 uint32 Cartridge::romOffset(uint32 address) const {
-  uint32 raw = offsetInFile(mapMode_, address);
-  if (raw == uint32(-1)) return -1;
-  uint32 logical = hasHeader_ ? raw - 512 : raw;
-  return logical >= data_.size() ? -1 : logical;
+  // Raw offset into the (header-stripped) ROM image for a 24-bit address,
+  // or the uint32 max when the address is outside the map mode's ROM
+  // windows. Mirror reads that run past the end of a power-of-two image
+  // wrap modulo the image size, exactly like a real mask ROM.
+  return offsetInFile(mapMode_, address);
 }
 
 void Cartridge::detect() {

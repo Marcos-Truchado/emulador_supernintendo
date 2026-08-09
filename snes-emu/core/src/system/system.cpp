@@ -16,12 +16,16 @@ System::~System() = default;
 
 auto System::load(const std::string& filename, std::string* error) -> bool {
   if (!cartridge_->load(filename, error)) return false;
+  bus_->power();   // power-on MMIO values + SRAM sizing, before CPU reads
   cpu_->power();   // fresh power-on state, then load the reset vector
   cpu_->reset();
   return true;
 }
 
-auto System::reset() -> void { cpu_->reset(); }
+auto System::reset() -> void {
+  bus_->reset();   // soft reset: only un-bracketed MMIO registers
+  cpu_->reset();
+}
 
 auto System::step() -> uint64 { return cpu_->execute(); }
 

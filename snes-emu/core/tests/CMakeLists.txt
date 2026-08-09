@@ -1,6 +1,7 @@
 add_executable(snes_tests
   main.cpp
   cartridge_tests.cpp
+  bus_tests.cpp
   cpu_tests.cpp
 )
 target_include_directories(snes_tests PRIVATE ${CMAKE_SOURCE_DIR}/third_party ${CMAKE_SOURCE_DIR}/core/src)

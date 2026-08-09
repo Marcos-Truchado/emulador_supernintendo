@@ -1,6 +1,6 @@
-# Estado del proyecto — Sesión CPU 65816 (Fase 0 + Fase 1)
+# Estado del proyecto — Fase 2: Bus mínimo + memoria + WRAM
 
-**Última actualización:** 2026-08-08
+**Última actualización:** 2026-08-10
 
 Este documento es el punto de recuperación de contexto para cualquier IA que
 continúe el proyecto. Léelo íntegro **antes** de tocar el código. La fuente de
@@ -12,42 +12,34 @@ verdad del diseño es `/Users/matru/Desktop/emulador_supernintendo/emulador_snes
 ## 0. Resumen ejecutivo
 
 El proyecto es un emulador de SNES en C++20 estilo higan/bsnes
-(dot/cycle-accurate), con el core totalmente desacoplado del frontend. Estamos
-en **Fase 0 (esqueleto/build)** + **Fase 1 (CPU 65816 aislada)**. El usuario
-ha pedido explícitamente: **solo Fase 0 y Fase 1, crear la infraestructura**.
-**NO tocar PPU/APU/scheduler** (Fase 2+).
+(dot/cycle-accurate), con el core totalmente desacoplado del frontend.
+Completadas: **Fase 0 (esqueleto/build)** + **Fase 1 (CPU 65816 aislada)** +
+**Fase 2 (bus mínimo + memoria + WRAM)**. **NO tocar PPU/APU/scheduler** (Fase
+3+); DMA reales son Fase 5.
 
-Estado actual de la CPU 65816:
+Estado actual:
 
 - ✅ Core completo portado del WDC65816 de higan/bsnes (fuente de referencia en
   `/tmp/wdc/`): conjunto de instrucciones completo, modos de direccionamiento,
   conteo de ciclos exacto por instrucción (ciclo por ciclo).
 - ✅ Desensamblador integrado + trace helpers.
-- ✅ Bus mínimo LoROM + WRAM + stubs MMIO (suficiente para test ROMs).
-- ✅ Cartridge loader con detección de cabecera (copier 512B), LoROM/HiROM/ExHiROM.
+- ✅ **Fase 2 (nuevo)**: bus completo LoROM/HiROM/ExHiROM + WRAM 128KB con
+  mirrors + SRAM (tamaño desde cabecera `$FFD8`) + registros base MMIO (mult/div
+  `$4202-$4206`, WRAM port `$2180-$2183`, sombras PPU `$2100-$2133`, puertos
+  APU `$2140-$217F`, registros DMA `$4300-$437F`, joypad stub) + open bus
+  (`lastData_` + `latch`) + valores power/reset según fullsnes.
+- ✅ Cartridge loader con detección de cabecera (copier 512B), LoROM/HiROM/ExHiROM,
+  `sramSize()` desde el byte de RAM de cabecera.
 - ✅ Harness de test `tools/cputest` que ejecuta `cputest-full.sfc`
-  (1107 tests de CPU comunitarios).
-- ✅ **`cputest-full` PASSA COMPLETO (1107/1107)**: `SUCCESS: reached 0081a2
-  (success handler) after 240228 instructions`. Hemos arreglado tres bugs:
-  `test0003` (bug de `readBank`/`writeBank`), la quirk `(dp,X)` en modo
-  emulación con `D.l != 0` (`readDirectX`), y la quirk de `PLB` en modo
-  emulación con `S=$01FF` (`pullN`). Ver sección 5.
-- ✅ Parking de WAI/STP + interrupciones externas NMI/IRQ implementadas (modelo
-  de ares: prioridad NMI > IRQ, vectores E/native, 2 ciclos de preludio, P con
-  B=0 en modo E, IRQ gateada por I). Ver Bug 5.
-- ✅ `power()` antes de `reset()` en `System::load()` (estado de encendido
-  limpio antes de cargar el vector de reset).
-- ✅ **Tests unitarios de CPU** (`core/tests/cpu_tests.cpp`, 8 TEST_CASE):
-  power/reset, WAI aparcado + despertar con NMI (8 ciclos E), NMI native
-  (4 pushes), IRQ gateada por I, prioridad NMI > IRQ, tabla de ciclos canónicos
-  y STP.
-- ✅ Build verde completo: `cmake --build build` compila y `snes_tests` (11
-  tests / 80 assertions) pasan 100%.
+  (1107 tests de CPU comunitarios) y `cputest-basic.sfc`.
+- ✅ **`cputest-full` y `cputest-basic` PASAN**: `SUCCESS: reached 0081a2`.
+- ✅ **Tests unitarios**: `snes_tests` = **26 TEST_CASE / 212 assertions** (CPU 8,
+  cartridge 7, bus 11) pasan 100%. Cobertura nueva de bus: routing por modo de
+  mapeo, mirrors WRAM/SRAM, mult/div (incl. división por cero y quirk RDDIV),
+  WRAM port auto-incremento, open bus, power/reset, DMA mirror `$43xF`→`$43xB`.
 
-Fase 1 (CPU 65816 aislada) COMPLETADA. Próximos pasos (Fase 2): bus
-LoROM/HiROM + WRAM + stubs MMIO completos, y verificar contra `snes_tests`.
-Consultar `fullsnes.txt`/`fullsnes.html` antes de implementar timing de
-CPU/PPU/APU/DMA.
+Fase 2 COMPLETADA. Próximos pasos (Fase 3): scheduler + PPU (consultar
+`fullsnes.txt`/`fullsnes.html` antes de implementar timing de CPU/PPU/APU/DMA).
 
 ---
 
@@ -62,8 +54,8 @@ snes-emu/
 │   ├── CMakeLists.txt             # lib estática snes_core (+ src cpu/system)
 │   ├── include/snes/snes.hpp      # API pública del core (Memory, Cartridge, Bus, System)
 │   ├── src/
-│   │   ├── bus/bus.cpp            # Bus LoROM: WRAM 128KB + MMIO stubs
-│   │   ├── cartridge/cartridge.cpp # Loader + detección de mapeo/cabecera
+│   │   ├── bus/bus.cpp            # Bus completo: LoROM/HiROM/ExHiROM + WRAM/SRAM + MMIO
+│   │   ├── cartridge/cartridge.cpp # Loader + detección de mapeo/cabecera + sramSize()
 │   │   ├── system/system.cpp     # Facade System: load/reset/step/run
 │   │   ├── cpu/
 │   │   │   ├── cpu65816.hpp        # NUCLÍ del core de la CPU (registros, flags, dispatch)
@@ -89,13 +81,75 @@ snes-emu/
 
 - `class Memory` — interfaz 24-bit de memoria: `read(uint24)`, `write(uint24, uint8)`.
 - `class Cartridge` — `load(filename|vector)`, `mapMode()`, `rom()`, `romSize()`,
-  `hasCopierHeader()`, `romOffset(uint24)`.
-- `class Bus : public Memory` — `read/write` con el mapa LoROM + WRAM de 128KB
-  + `mmioRead` (stubs: `$4210/$4211` alternan bit7 para `wait_for_vblank`;
-  `$4212` → 0; `$4218-$421F` → 0).
-- `class System` — `load()`, `reset()`, `step()` (1 instrucción, devuelve ciclos),
-  `run(maxCycles)`, accessors `cpu()`, `bus()`, `cartridge()`.
+  `hasCopierHeader()`, `sramSize()`, `romOffset(uint24)` (offset bruto; -1 = ventana
+  sin ROM; el wrapping módulo tamaño es responsabilidad del bus, como una mask ROM).
+- `class Bus : public Memory` — `read/write` con el mapa completo por modo de
+  mapeo + `power()`/`reset()` (valores fullsnes, bracketed vs un-bracketed),
+  `sram()` (buffer de batería), `openBus()` (`lastData_`), acceso de test a
+  registros: `ppuRegister()`, `apuPort()`, `cpuRegister()`, `dmaRegister()`,
+  `wramAddress()`.
+- `class System` — `load()` (llama `bus_->power()` + `cpu_->power()` + `cpu_->reset()`),
+  `reset()` (llama `bus_->reset()` + `cpu_->reset()`), `step()` (1 instrucción,
+  devuelve ciclos), `run(maxCycles)`, accessors `cpu()`, `bus()`, `cartridge()`.
 - Tipos: `uint8/int8/uint16/int16/uint24 (uint32)/uint32/uint64`.
+
+## 6. Fase 2 — Bus mínimo + memoria + WRAM (diseño implementado)
+
+### 6.1 Mapa de memoria por modo de mapeo
+
+Sistema (todos los modos), bancos `$00-3F/$80-BF`, offset:
+- `$0000-$1FFF` → 8KB mirror de WRAM; `$2000-$20FF` y `$2200-$3FFF` → mirrors
+  de WRAM (comportamiento de Fase 1, conservado).
+- `$2100-$21FF` → puertos B-Bus (PPU/APU/WRAM port).
+- `$4000-$43FF` → registros CPU on-chip; `$4400-$5FFF` → open bus.
+- `$6000-$7FFF` → SRAM (HiROM `$20-3F/$A0-BF`; ExHiROM `$80-BF`), si no hay SRAM
+  → open bus. `$8000-$FFFF` → ROM.
+
+WRAM 128KB: `$7E:0000-FFFF` y `$7F:0000-FFFF`; HiROM además mirrors completos
+en `$3E-3F/$BE-BF`.
+
+Cartucho (window 64KB), según `cartridge_.mapMode()`:
+- **LoROM**: `$40-7D/$C0-FF:0000-FFFF` → ROM lineal `(bank & 0x3F) << 16 + offs`
+  (los bancos 40-5F son espejo de `$00-3F:8000`, 60-7D continúan). SRAM en
+  `$70-7D/$F0-FF:0000-7FFF`.
+- **HiROM**: `$40-7D:0000-FFFF` → ROM; `$C0-FF` → espejo; bancos sistema
+  `:8000-FFFF` → espejo de `$40-7D:0000-7FFF`. SRAM en `$20-3F/$A0-BF:6000-7FFF`.
+- **ExHiROM**: `$40-7D` → primeros 4MB, `$C0-FF` → siguientes 4MB; sistema
+  `:8000-FFFF` → espejo de `$40-7D:0000-7FFF`. Sin SRAM.
+
+Open bus: toda lectura no mapeada devuelve `lastData_` (último byte en el bus
+de datos, tracks de writes y reads). Las ROMs de tamaño potencia de dos envuelven
+módulo tamaño (comportamiento de mask ROM real).
+
+### 6.2 Registros MMIO implementados (Fase 2)
+
+- `$4200` NMITIMEN / `$4201` WRIO / `$4207-420A` HTIME/VTIME: almacenamiento
+  (timing es Fase 3+).
+- `$4202/$4203` WRMPYA/WRMPYB: multiplicación 8×8 → `$4216/$4217`; quirk de
+  fullsnes: también escribe RDDIVL=WRMPYB, RDDIVH=0.
+- `$4204-$4206` WRDIV: división 16/8 → cociente `$4214/$4215`, resto
+  `$4216/$4217`; división por cero: cociente `$FFFF`, resto = dividendo.
+- `$2180` puerto WRAM (r/w, auto-incremento, dirección 17-bit enmascarada a
+  128KB), `$2181-$2183` WMADDL/M/WRIT.
+- `$2100-$2133` PPU write-only → sombras (`ppuReg_`); reads → open bus.
+- `$2140-$217F` puertos APU (`apuPort_`, espejos incluidos) — almacenamiento.
+- `$4300-$437F` DMA (8 canales × 16B, `dmaReg_`): DMAP/A1TxL/H/A1Bx/DASxL/H/
+  DASBx + mirror `$43xF`→`$43xB` (mismo canal). Lecturas `$43xC-$43xE` → open bus.
+- `$4016/$4017`, `$4218-$421F` joypad → 0 (stub, necesario para el fail-detect
+  del cputest).
+- `$4210` RDNMI: versión CPU 2 (bits 3-0) + flag vblank alternado (bit7) para
+  `wait_for_vblank`; `$4211` TIMEUP alterna igual; `$4212` HVBJOY → 0.
+- `$2134-$2136` (resultado PPU1 mult) → 0; `$2137` → open bus; `$2138-$213F` → 0.
+
+### 6.3 power()/reset() (fullsnes columna derecha)
+
+- `power()`: tamaño SRAM desde `cartridge_.sramSize()` y la limpia; `lastData_=0`;
+  registros DMA → `$FF` (A1Bx indefinido = `xxh` en fullsnes → `$FF`); WRIO/HTIME/
+  VTIME → `$FF/$01`; RDDIV/RDMPY → 0.
+- `reset()`: solo valores sin corchetes de fullsnes: NMITIMEN→0, WRIO→`$FF`,
+  HTIME/VTIME→`$FF/$01`, MDMAEN/HDMAEN/MEMSEL→0, DMAPx→`$FF` (A1Bx se conserva).
+- `System::load()` llama `bus_->power()` antes de `cpu_->power()`; `System::reset()`
+  llama `bus_->reset()` antes de `cpu_->reset()`.
 
 ## 4. CPU 65816 — diseño e implementación
 
@@ -282,14 +336,16 @@ despacho de interrupciones) y `System::load()` nunca llamaba `power()`.
   `build/tools/cputest/snes_cputest` (harness).
 - Comandos usados en esta sesión:
   - `cmake --build build` en el raíz.
-  - `./build/core/tests/snes_tests`
-  - `./build/tools/cputest/snes_cputest /var/folders/.../cputest/cputest-full.sfc`
-- Fuente de los test ROMs del harness (no es parte del repo del emulador;
-  están en `/var/folders/3f/d4xfpj8n44zbp_3yw91b93xm0000gn/T/opencode/snestests/cputest/`):
-  - `.sfc` sin header, LoROM.
-  - `cputest` has baseline: `tests-basic.sfc` (probablemente) y `tests-full`.
-  - `tests-full.inc` (68k lines, 1107 tests inline con stubs).
-  - `tests_table.inc` (tabla con farronaddrs de cada test).
+  - `./build/core/tests/snes_tests` → **26 TEST_CASE / 212 assertions**.
+  - `./build/tools/cputest/snes_cputest third_party/cputest/cputest-full.sfc`
+    → SUCCESS (`0081a2`).
+  - `./build/tools/cputest/snes_cputest third_party/cputest/cputest-basic.sfc`
+    → SUCCESS.
+- ROMs del harness versionadas en `third_party/cputest/` (antes en
+  `/var/folders/.../opencode/snestests/cputest/`); su fuente de referencia
+  (tests-full.inc, tests_table.inc) está en `/tmp/wdc/`.
+- Nota: `ctest` no registra tests (el `enable_testing()` está en un
+  subdirectory, debe subirse al raíz) — ejecutar `snes_tests` directamente.
 
 ## 7. ❗Cómo continuar el curso (siguiente IA)
 
@@ -297,14 +353,14 @@ despacho de interrupciones) y `System::load()` nunca llamaba `power()`.
    - `/Users/matru/Desktop/emulador_supernintendo/emulador_snes_diseno.md` (§1.2 scheduler,
      §4.1 CPU, §9 roadmap, §10 testing).
    - Referencia hardware antes de implementar timing: `fullsnes.html`/`fullsnes.txt`.
-2. **Fase 1 COMPLETADA**: `cputest-full` pasa 1107/1107, WAI/STP/NMI/IRQ/
-   power/reset implementados y 8 tests unitarios de CPU verdes. Fase 2 en
-   curso: bus LoROM/HiROM + WRAM + stubs MMIO (verificar con `snes_tests`,
-   11 tests / 80 assertions).
+2. **Fase 2 COMPLETADA**: bus LoROM/HiROM/ExHiROM + WRAM + SRAM + registros
+   base MMIO + open bus + power/reset; `snes_tests` 26/212 verdes, cputest-full
+   y cputest-basic pasan. Fase 3 en curso: scheduler + PPU (ver §1.2 scheduler
+   y §4.1 CPU del diseño). Al implementar timing, consultar `fullsnes.txt`.
 3. **Mantener infraestructura**: cada fix bien comentado, con su sección en
    `docs/update.md` (historial de bugs) y los tests de cputest verdes.
 4. **NO ampliar alcance**: si una solución necesita tocar PPU/APU/scheduler,
-   PARAR y avisar. Sólo fase 0/1.
+   PARAR y avisar. Solo fase 0/1/2.
 
 ## Cómo compilar/unir todo
 - `cd snes-emu && cmake --build build` (o `make -C build`).
