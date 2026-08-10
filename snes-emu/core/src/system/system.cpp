@@ -17,7 +17,12 @@ System::System() : cartridge_(std::make_unique<Cartridge>()),
                    ppu_(std::make_unique<Ppu>()),
                    scheduler_(std::make_unique<Scheduler>(*ppu_)),
                    bus_(std::make_unique<Bus>(*cartridge_, *ppu_)),
-                   cpu_(std::make_unique<Cpu65816>(*bus_, *scheduler_)) {}
+                   cpu_(std::make_unique<Cpu65816>(*bus_, *scheduler_)) {
+  // Phase 3b: PPU owns the 65816 interrupt semantics (NMI edge-detect,
+  // IRQ level) and drives the CPU's external pins through these sinks.
+  ppu_->setNmiPin([this](bool value) { cpu_->setNmi(value); });
+  ppu_->setIrqPin([this](bool value) { cpu_->setIrq(value); });
+}
 
 System::~System() = default;
 

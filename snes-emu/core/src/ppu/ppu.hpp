@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include "scheduler/thread.hpp"
 #include "snes/snes.hpp"
 
@@ -41,9 +43,21 @@ namespace snes {
 //
 // Out of scope (phase 3, documented): rendering, forced blank, counter
 // latches ($213C-$213F), joypad auto-read, OAMADD reload, HDMA, DRAM
-// refresh (40 master cycles at H=133.5), long/short scanlines, PAL,
-// interlace, and real NMI/IRQ delivery to the CPU (fase3 doc §4.2: the
-// CPU's internal edge-detected NMI flag is a phase 4+ concern).
+// refresh (40 master cycles at H=133.5), long/short scanlines, PAL, and
+// interlace.
+//
+// Phase 3b adds the notification mechanism (fase3 doc §11.8, update.md):
+// the PPU owns the exact 65816 semantics and drives two sink pins toward
+// the CPU via std::function hooks wired by the System:
+//   NMI — edge-detected internally: raised once per 0->1 edge of
+//   "NMITIMEN.7 AND $4210-latch" (fullsnes "NMI flag gets set when
+//   [4200h].7 AND [4210h].7 changes from 0-to-1"); the CPU clears the pin
+//   on dispatch, so one edge = one NMI, and re-enabling NMITIMEN.7 inside
+//   a pending VBlank re-arms the edge ("old NMI mis-executed", fullsnes).
+//   IRQ — level-sensitive: the pin is a live mirror of the $4211 latch,
+//   re-driven every dot and whenever the latch is cleared without a dot
+//   advance (read $4211, disable via $4200 bits 5-4, power/reset), so an
+//   un-acked IRQ re-fires after RTI (I flag gating lives in the CPU).
 class Ppu : public Thread {
  public:
   Ppu() = default;
@@ -66,6 +80,10 @@ class Ppu : public Thread {
   auto read4211() -> uint8;            // TIMEUP (Read/Ack)
   auto read4212() -> uint8;            // HVBJOY (live)
 
+  // ---- interrupt delivery sinks (phase 3b; wired by System) ----
+  auto setNmiPin(std::function<void(bool)> sink) -> void { nmiPin_ = std::move(sink); }
+  auto setIrqPin(std::function<void(bool)> sink) -> void { irqPin_ = std::move(sink); }
+
   // ---- counters / flags (tests, runner, later phases) ----
   auto dot() const -> uint16 { return dot_; }            // H counter 0..340
   auto scanline() const -> uint16 { return scanline_; }  // V counter 0..261
@@ -78,6 +96,7 @@ class Ppu : public Thread {
 
  private:
   auto advanceDot() -> void;  // one dot = 4 master cycles
+  auto driveIrqPin() -> void; // pin := live mirror of the $4211 latch
 
   uint16 dot_ = 0;        // H counter 0..340
   uint16 scanline_ = 0;   // V counter 0..261 (NTSC)
@@ -90,6 +109,11 @@ class Ppu : public Thread {
   bool vblank_ = false;   // $4210 bit7 latched (Read/Ack)
   bool irqFlag_ = false;  // $4211 bit7 latched (Read/Ack)
   bool hblank_ = false;   // $4212 bit6 live
+
+  bool nmiEdgePrev_ = false;  // NMI edge-detect: previous dot's "NMITIMEN.7
+                              // AND $4210-latch" sample
+  std::function<void(bool)> nmiPin_;  // raised on the 0->1 NMI edge
+  std::function<void(bool)> irqPin_;  // level mirror of irqFlag_
 };
 
 }  // namespace snes

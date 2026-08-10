@@ -215,4 +215,103 @@ TEST_CASE("ppu: long scanline/H-counter wrap is exact (341 dots)") {
   }
 }
 
+TEST_CASE("ppu: NMI pin raises once per frame on the internal edge") {
+  Ppu ppu;
+  ppu.power();
+  int raises = 0;
+  ppu.setNmiPin([&](bool value) { if (value) raises++; });
+
+  ppu.write4200(0x80);  // NMI enabled
+  ppu.step(225 * kLine - 4);
+  CHECK(raises == 0);
+  ppu.step(4);  // H=0, V=225: internal NMI flag edge (NMITIMEN.7 AND latch)
+  CHECK(raises == 1);
+
+  // Still inside VBlank: the AND stays high, no second edge -> no re-raise.
+  ppu.step(20 * kLine);
+  CHECK(raises == 1);
+
+  // V=0: end of VBlank drops the AND; the next VBlank re-arms the edge.
+  ppu.step((262 - 245) * kLine);
+  CHECK(raises == 1);
+  ppu.step(225 * kLine - 4);
+  ppu.step(4);  // next frame's VBlank
+  CHECK(raises == 2);
+}
+
+TEST_CASE("ppu: NMI edge re-arms when $4210 is read mid-VBlank") {
+  Ppu ppu;
+  ppu.power();
+  int raises = 0;
+  ppu.setNmiPin([&](bool value) { if (value) raises++; });
+
+  ppu.write4200(0x80);
+  ppu.step(225 * kLine - 4);
+  ppu.step(4);
+  CHECK(raises == 1);
+
+  // Reading $4210 clears the latch -> the AND drops -> the edge re-arms
+  // within the same VBlank (next VBlank raises again).
+  CHECK(ppu.read4210() == 0x82);
+  ppu.step((262 - 225) * kLine);  // through V=0 and back to the frame start
+  CHECK(raises == 1);
+  ppu.step(225 * kLine - 4);
+  ppu.step(4);  // next frame VBlank: fresh 0->1 edge
+  CHECK(raises == 2);
+}
+
+TEST_CASE("ppu: NMI disabled by $4200 bit7 raises nothing; re-enable "
+          "mid-VBlank mis-executes the old NMI") {
+  Ppu ppu;
+  ppu.power();
+  int raises = 0;
+  ppu.setNmiPin([&](bool value) { if (value) raises++; });
+
+  ppu.step(225 * kLine - 4);
+  ppu.step(4);  // VBlank latch set, NMI disabled: no raise
+  CHECK(ppu.vblankFlag() == true);
+  CHECK(raises == 0);
+
+  // Re-enabling NMITIMEN.7 inside the pending VBlank: the AND 0->1 edge
+  // fires immediately (fullsnes "old NMI mis-executed on re-enable").
+  ppu.write4200(0x80);
+  ppu.step(4);
+  CHECK(raises == 1);
+}
+
+TEST_CASE("ppu: IRQ pin mirrors the $4211 latch (level model)") {
+  Ppu ppu;
+  ppu.power();
+  bool pin = false;
+  int calls = 0;
+  ppu.setIrqPin([&](bool value) { pin = value; calls++; });
+
+  ppu.write4200(0x10);  // H-IRQ mode
+  ppu.write4207(50);
+  ppu.write4208(0);
+  ppu.step(50 * 4 - 4);
+  CHECK(pin == false);
+  ppu.step(4);  // H=50: latch set, pin raised
+  CHECK(pin == true);
+
+  // Read/Ack drops the pin without a dot advance.
+  CHECK(ppu.read4211() == 0x80);
+  CHECK(pin == false);
+
+  // Next scanline re-triggers: latch and pin back up.
+  ppu.step(kLine - 4);
+  ppu.step(4);
+  CHECK(pin == true);
+
+  // Disabling IRQs ($4200 bits 5-4 -> 0) acknowledges: pin drops.
+  ppu.write4200(0x00);
+  CHECK(pin == false);
+
+  // And re-arming the mode makes it trigger again.
+  ppu.write4200(0x10);
+  ppu.step(kLine - 4);
+  ppu.step(4);
+  CHECK(pin == true);
+}
+
 }  // namespace snes

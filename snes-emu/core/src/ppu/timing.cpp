@@ -50,6 +50,28 @@ auto Ppu::advanceDot() -> void {
                 : dot_ == htime_ && scanline_ == vtime_;
     if (match) irqFlag_ = true;
   }
+
+  // NMI delivery (phase 3b): edge-detect the internal flag, which is the
+  // AND of NMITIMEN.7 and the $4210 latch (fullsnes: "NMI flag gets set
+  // when [4200h].7 AND [4210h].7 changes from 0-to-1"). Raised once per
+  // 0->1 edge; the CPU clears its pin on dispatch, so one edge = one NMI.
+  // Re-enabling NMITIMEN.7 inside a pending VBlank re-arms the edge (an
+  // "old NMI mis-executed", exactly as on hardware).
+  bool nmiSource = (nmitimen_ & 0x80) && vblank_;
+  if (nmiSource && !nmiEdgePrev_ && nmiPin_) nmiPin_(true);
+  nmiEdgePrev_ = nmiSource;
+
+  // IRQ pin: level model, live mirror of the $4211 latch. Driven every
+  // dot so an un-acked IRQ stays asserted after the CPU's dispatch clears
+  // its own latch and after RTI (re-fires until $4211 is read or the IRQ
+  // is disabled — fullsnes level semantics).
+  driveIrqPin();
+}
+
+// ---- interrupt delivery sinks (phase 3b) ----
+
+auto Ppu::driveIrqPin() -> void {
+  if (irqPin_) irqPin_(irqFlag_);
 }
 
 // ---- MMIO ----
@@ -59,6 +81,7 @@ auto Ppu::write4200(uint8 data) -> void {
   // Disabling IRQs (bits 5-4 -> 0) acknowledges them (fullsnes); disabling
   // NMI (bit7 -> 0) does NOT touch the $4210 latch.
   if (((data >> 4) & 3) == 0) irqFlag_ = false;
+  driveIrqPin();  // ack drops the IRQ pin without a dot advance
 }
 
 auto Ppu::write4207(uint8 data) -> void { htime_ = (htime_ & 0x100) | data; }
@@ -75,6 +98,7 @@ auto Ppu::read4210() -> uint8 {
 auto Ppu::read4211() -> uint8 {
   uint8 value = irqFlag_ ? 0x80 : 0x00;
   irqFlag_ = false;  // Read/Ack
+  driveIrqPin();     // ack drops the IRQ pin without a dot advance
   // fullsnes exception (read exactly at the trigger instant keeps the
   // flag) is not modeled: unobservable at dot-granularity sampling.
   return value;
@@ -98,6 +122,8 @@ auto Ppu::power() -> void {
   vblank_ = false;
   irqFlag_ = false;
   hblank_ = false;
+  nmiEdgePrev_ = false;
+  driveIrqPin();
 }
 
 auto Ppu::reset() -> void {
@@ -110,6 +136,8 @@ auto Ppu::reset() -> void {
   frame_ = 0;
   vblank_ = false;
   hblank_ = false;
+  nmiEdgePrev_ = false;
+  driveIrqPin();
 }
 
 }  // namespace snes

@@ -1,6 +1,6 @@
-# Estado del proyecto — Fase 3: Scheduler + PPU timing-only
+# Estado del proyecto — Fase 3 + 3b: Scheduler + PPU timing-only + NMI/IRQ
 
-**Última actualización:** 2026-08-10
+**Última actualización:** 2026-08-11
 
 Este documento es el punto de recuperación de contexto para cualquier IA que
 continúe el proyecto. Léelo íntegro **antes** de tocar el código. La fuente de
@@ -15,8 +15,8 @@ El proyecto es un emulador de SNES en C++20 estilo higan/bsnes
 (dot/cycle-accurate), con el core totalmente desacoplado del frontend.
 Completadas: **Fase 0 (esqueleto/build)** + **Fase 1 (CPU 65816 aislada)** +
 **Fase 2 (bus mínimo + memoria + WRAM)** + **Fase 3 (scheduler + PPU
-timing-only)**. **NO tocar APU/DMA** (Fases 4/5); entrega de NMI/IRQ al CPU y
-rendering son Fase 4.
+timing-only)** + **Fase 3b (entrega real de NMI/IRQ al CPU)**. **NO tocar
+APU/DMA** (Fases 5/6); rendering es Fase 4.
 
 Estado actual:
 
@@ -42,15 +42,21 @@ Estado actual:
   `sync()` antes del acceso y `step(waitStates)` después.
 - ✅ **Test ROM propio** `tools/fase3` (generada en build-time): VBlank x10,
   V-IRQ x10, NMI latch `$4210`==0x82 x10, HBlank 27/200 — pasa.
-- ✅ **Tests unitarios**: `snes_tests` = **40 TEST_CASE / 269133 assertions**
-  (CPU 8, cartridge 7, bus 13, scheduler 3, ppu timing 8 + integración)
-  pasan 100%. Ver §8.2 para erratas del diseño fase3 (HTIME/VTIME power =
-  0x1FF, eventos post-incremento, `$4212` bit6 en H=0 = 1).
+- ✅ **Tests unitarios**: `snes_tests` = **47 TEST_CASE / 269181 assertions**
+  (CPU 8, cartridge 7, bus 13, scheduler 3, ppu timing 12 + integración 3 +
+  interrupt 3) pasan 100%. Ver §8.2 para erratas del diseño fase3 (HTIME/VTIME
+  power = 0x1FF, eventos post-incremento, `$4212` bit6 en H=0 = 1).
+- ✅ **Fase 3b (nuevo)**: entrega real de NMI/IRQ al CPU — edge-detect interno
+  del flag NMI en la PPU (`NMITIMEN.7 AND latch $4210`, fullsnes), pin IRQ como
+  espejo de nivel del latch `$4211`, sinks `std::function` cableados en
+  `System` → `Cpu65816::setNmi/setIrq`. Vectores + push/pull + RTI ya
+  existían en el CPU y se validan de extremo a extremo con ROMs mínimas
+  LoROM (saltar al vector, RTI vuelve, NMI 1/frame, IRQ nivel re-dispara sin
+  ack, read `$4211` limita a 1/frame). Ver §9.
 
-Fase 3 COMPLETADA. Próximos pasos (Fase 4): entrega real de NMI/IRQ al CPU
-(edge-detect, vectores, RTI — validar con blargg `nmi_test`/`irq_test`) +
-rendering PPU (consultar `fullsnes.txt`/`fullsnes.html` antes de implementar
-timing de CPU/PPU/APU/DMA).
+Fase 3 + 3b COMPLETADAS. Próximos pasos (Fase 4): rendering PPU (consultar
+`fullsnes.txt`/`fullsnes.html` antes de implementar timing de CPU/PPU/APU/DMA);
+validar con blargg `nmi_test`/`irq_test` si se quiere contraste extra.
 
 ---
 
@@ -429,16 +435,87 @@ Counters / H/V Events") y `fullsnes.html`.
 
 ```bash
 cmake --build build
-./build/core/tests/snes_tests        # 40 TEST_CASE / 269133 assertions
+./build/core/tests/snes_tests        # 47 TEST_CASE / 269181 assertions
 ./build/tools/cputest/snes_cputest third_party/cputest/cputest-full.sfc   # SUCCESS 0081a2
 ./build/tools/cputest/snes_cputest third_party/cputest/cputest-basic.sfc  # SUCCESS
 ./build/tools/fase3/snes_fase3 build/tools/fase3/fase3_timing.sfc         # SUCCESS
 ```
 
 - La ROM de fase3 se genera en build-time (CMake custom command, Python3).
-- Pendiente para Fase 4 (o 3b): entrega real de NMI/IRQ al CPU (edge-detect
-  interno, vectores, RTI) — blargg `nmi_test`/`irq_test`; rendering; latches
-  `$213C-$213F`; líneas largas/cortas (341/342/340); PAL.
+- La entrega real de NMI/IRQ al CPU se completó como **Fase 3b** — ver §9.
+- Pendiente para Fase 4: rendering; latches `$213C-$213F`; líneas
+  largas/cortas (341/342/340); PAL.
+
+## 9. Fase 3b — Entrega real de NMI/IRQ al CPU (COMPLETADA)
+
+El punto 1 del plan (§11.8/§13 de `fase3_scheduler_diseno.md`): la PPU pasa de
+"latchea flags que el juego lee" a "notifica al CPU". El CPU ya tenía los pins
+externos `setNmi/setIrq` (modelo de nivel, limpiados al despachar) y el
+dispatch con vectores E/native correctos (`execute()`: nmi→`$FFFA`/`$FFEA`,
+irq→`$FFFE`/`$FFEE`) + `interrupt()`/RTI validados por `cpu_tests` — esa parte
+no cambió. Lo nuevo es el **mecanismo de notificación** y su semántica.
+
+### 9.1 Diseño (semántica exacta 65816, fullsnes l.744-760)
+
+- **NMI — edge-detect interno en la PPU**: fullsnes l.760 — "NMI flag gets set
+  when `[4200h].7 AND [4210h].7` changes from 0-to-1". Cada dot se computa
+  `nmiSource = NMITIMEN.7 && latch_$4210` (`vblank_`) y el pin se levanta solo
+  en el flanco 0→1 (`nmiEdgePrev_`). El CPU limpia su pin al despachar, así que
+  un flanco = un NMI; re-habilitar `$4200` bit7 dentro de un VBlank pendiente
+  rearma el flanco → "NMI viejo mal-ejecutado" (fullsnes).
+- **IRQ — nivel**: el pin es un espejo LIVE de `irqFlag_` ($4211 latch). Se
+  re-conduce cada dot (un IRQ sin ack re-dispara tras cada RTI — semántica de
+  nivel) y también en cada sitio que limpia el latch sin avance de dot: read
+  `$4211`, disable IRQ vía `$4200` bits 5-4, power/reset. El gateo por I vive
+  en el CPU (ya existía).
+- **Cableado**: `Ppu` expone dos sinks `std::function<void(bool)>`
+  (`setNmiPin`/`setIrqPin`, vacíos por defecto → no-op en tests unitarios de
+  PPU); `System` los cablea a `cpu_->setNmi/setIrq` en su constructor. El
+  modelo cooperativo no cambia: la PPU solo corre dentro de `sync()`, y el
+  flanco se evalúa exactamente en el dot del evento; el CPU lo ve en el
+  siguiente dispatch de `execute()` (entre instrucciones, como el hardware).
+
+### 9.2 Implementado
+
+- `core/src/ppu/ppu.hpp` + `timing.cpp`: edge-detect NMI en `advanceDot()`,
+  `driveIrqPin()` (espejo de nivel) llamada cada dot y en los 5 sitios de
+  mutación del latch, power/reset con `nmiEdgePrev_ = false`.
+- `core/src/system/system.cpp`: constructor cablea los dos pins.
+- `core/tests/ppu_timing_tests.cpp`: 4 tests nuevos de sinks (1 raise por
+  frame; re-armado tras read `$4210` mid-VBlank; disable + re-enable
+  mid-VBlank = mis-execute; espejo nivel IRQ con read/disable).
+- `core/tests/interrupt_tests.cpp` (nuevo, registrado en el CMake): 3 tests de
+  integración con ROMs LoROM mínimas en memoria (sin fichero):
+  1. **NMI**: salta al vector `$FFFA` (E mode), P pushed con B=0, I=1 dentro
+     del handler, exactamente 1 por frame (edge), RTI vuelve al loop con P
+     restaurada, 2 NMIs en 2 frames.
+  2. **IRQ gateo + nivel**: IRQ latchea con I=1 y NO despacha; tras `cli`
+     despacha y, sin ack, cada RTI re-entra (≥5 despachos); RTI restaura I=0.
+  3. **IRQ ack**: handler lee `$4211` → exactamente 2 despachos en 2 frames
+     (una vez por frame, modo 2) y no re-dispara en el resto del frame.
+
+### 9.3 Erratas / notas
+
+1. La excepción de fullsnes "read `$4211` exactamente en el instante del
+   trigger conserva el flag" sigue sin modelarse (indistinguible a
+   granularidad de dot).
+2. El pin NMI queda "levantado" mientras la fuente AND siga activa y el CPU no
+   haya despachado (WAI se despierta igual: `interruptPending()` incluye nmi).
+3. Los tests de integración arrancan el System replicando `System::load()`
+   (cartridge load con vector + power/reset manuales) y necesitan el vector de
+   reset en `$FFFC` — olvidarlo hace que el CPU arranque en el relleno 0xEA y
+   acabe en BRKs (`$0000`), lo que produjo falsos fallos en la primera pasada.
+
+### 9.4 Validación
+
+```bash
+cmake --build build
+./build/core/tests/snes_tests   # 47 TEST_CASE / 269181 assertions, 100%
+```
+
+cputest-full/basic y la ROM de fase3 siguen verdes (la ROM de fase3 nunca
+habilita bit7 de `$4200`, así que no recibe NMI — su polling de `$4210`/`$4211`
+no cambia).
 
 ## Cómo compilar/unir todo
 - `cd snes-emu && cmake --build build` (o `make -C build`).
