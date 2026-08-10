@@ -17,6 +17,7 @@
 // macros (see opcodes.cpp).
 
 #include "snes/snes.hpp"
+#include "scheduler/scheduler.hpp"
 
 #include <cstdint>
 #include <string>
@@ -28,7 +29,7 @@ class Cpu65816 {
   using alu8 = auto (Cpu65816::*)(uint8) -> uint8;
   using alu16 = auto (Cpu65816::*)(uint16) -> uint16;
 
-  explicit Cpu65816(Memory& mem) : mem_(mem) {}
+  explicit Cpu65816(Memory& mem, Scheduler& scheduler) : mem_(mem), scheduler_(scheduler) {}
   ~Cpu65816() = default;
 
   Cpu65816(const Cpu65816&) = delete;
@@ -164,6 +165,7 @@ class Cpu65816 {
   r24 W;    // temporary
 
   Memory& mem_;
+  Scheduler& scheduler_;
   uint64 cycles_ = 0;
 
   // ---- 1-cycle memory operations ----

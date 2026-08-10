@@ -16,6 +16,13 @@ struct TestMemory : snes::Memory {
   }
 };
 
+// No cooperative thread in CPU-only tests: the scheduler just accumulates.
+struct DummyThread : snes::Thread {
+  auto step(snes::uint64 masterCycles) -> void override {
+    (void)masterCycles;
+  }
+};
+
 void poke(TestMemory& m, snes::uint24 addr, snes::uint8 v) {
   m.data[addr & 0xffff] = v;
 }
@@ -30,7 +37,9 @@ namespace snes {
 
 TEST_CASE("cpu: power and reset state") {
   TestMemory mem;
-  Cpu65816 cpu(mem);
+  DummyThread thread;
+  Scheduler scheduler(thread);
+  Cpu65816 cpu(mem, scheduler);
   cpu.power();
   CHECK(cpu.emulation());
   CHECK(cpu.flagP() == 0x34);
@@ -49,7 +58,9 @@ TEST_CASE("cpu: power and reset state") {
 
 TEST_CASE("cpu: WAI parks until NMI wakes it") {
   TestMemory mem;
-  Cpu65816 cpu(mem);
+  DummyThread thread;
+  Scheduler scheduler(thread);
+  Cpu65816 cpu(mem, scheduler);
   cpu.power();
   poke16(mem, 0xfffc, 0x8000);
   cpu.reset();
@@ -77,7 +88,9 @@ TEST_CASE("cpu: WAI parks until NMI wakes it") {
 
 TEST_CASE("cpu: NMI in native mode pushes 4 bytes") {
   TestMemory mem;
-  Cpu65816 cpu(mem);
+  DummyThread thread;
+  Scheduler scheduler(thread);
+  Cpu65816 cpu(mem, scheduler);
   cpu.power();
   poke16(mem, 0xfffc, 0x8000);
   cpu.reset();
@@ -102,7 +115,9 @@ TEST_CASE("cpu: NMI in native mode pushes 4 bytes") {
 
 TEST_CASE("cpu: IRQ is gated by the I flag") {
   TestMemory mem;
-  Cpu65816 cpu(mem);
+  DummyThread thread;
+  Scheduler scheduler(thread);
+  Cpu65816 cpu(mem, scheduler);
   cpu.power();
   poke16(mem, 0xfffc, 0x8000);
   cpu.reset();
@@ -126,7 +141,9 @@ TEST_CASE("cpu: IRQ is gated by the I flag") {
 
 TEST_CASE("cpu: NMI takes priority over IRQ") {
   TestMemory mem;
-  Cpu65816 cpu(mem);
+  DummyThread thread;
+  Scheduler scheduler(thread);
+  Cpu65816 cpu(mem, scheduler);
   cpu.power();
   poke16(mem, 0xfffc, 0x8000);
   cpu.reset();
@@ -173,7 +190,9 @@ TEST_CASE("cpu: canonical cycle counts") {
   };
   for (const auto& c : cases) {
     TestMemory mem;
-    Cpu65816 cpu(mem);
+    DummyThread thread;
+    Scheduler scheduler(thread);
+    Cpu65816 cpu(mem, scheduler);
     cpu.power();
     for (size_t i = 0; i < c.prog.size(); i++) poke(mem, 0x8000 + i, c.prog[i]);
     poke16(mem, 0xfffc, 0x8000);
@@ -187,7 +206,9 @@ TEST_CASE("cpu: canonical cycle counts") {
 
 TEST_CASE("cpu: STP halts forever, WAI parked cycles") {
   TestMemory mem;
-  Cpu65816 cpu(mem);
+  DummyThread thread;
+  Scheduler scheduler(thread);
+  Cpu65816 cpu(mem, scheduler);
   cpu.power();
   poke16(mem, 0xfffc, 0x8000);
   cpu.reset();

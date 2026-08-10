@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "snes/snes.hpp"
+#include "ppu/ppu.hpp"
 
 TEST_CASE("cartridge: LoROM map mode detection from header byte") {
   // 256KB "LoROM" test image, header byte $20 (LoROM family), no copier header.
@@ -55,7 +56,8 @@ TEST_CASE("bus: WRAM + MMIO + ROM reads") {
   rom[0x7FD5] = 0x20;
   REQUIRE(cart.load(std::move(rom), &error));
 
-  snes::Bus bus(cart);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
 
   // WRAM write/read
   bus.write(0x7E0000, 0x42);
@@ -65,9 +67,9 @@ TEST_CASE("bus: WRAM + MMIO + ROM reads") {
   CHECK(bus.read(0x010000) == 0x99);
   // ROM through LoROM mapping
   CHECK(bus.read(0x008000) == 0xFF);
-  // $4210 alternates for wait_for_vblank, with 5A22 version 2
+  // $4210 RDNMI: 5A22 version 2, NMI flag clear (PPU idle -> no VBlank)
   CHECK(bus.read(0x004210) == 0x02);
-  CHECK(bus.read(0x004210) == 0x82);
+  CHECK(bus.read(0x004210) == 0x02);
   // $4212 idle
   CHECK(bus.read(0x004212) == 0x00);
 }

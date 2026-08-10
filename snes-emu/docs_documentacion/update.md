@@ -1,4 +1,4 @@
-# Estado del proyecto — Fase 2: Bus mínimo + memoria + WRAM
+# Estado del proyecto — Fase 3: Scheduler + PPU timing-only
 
 **Última actualización:** 2026-08-10
 
@@ -14,8 +14,9 @@ verdad del diseño es `/Users/matru/Desktop/emulador_supernintendo/emulador_snes
 El proyecto es un emulador de SNES en C++20 estilo higan/bsnes
 (dot/cycle-accurate), con el core totalmente desacoplado del frontend.
 Completadas: **Fase 0 (esqueleto/build)** + **Fase 1 (CPU 65816 aislada)** +
-**Fase 2 (bus mínimo + memoria + WRAM)**. **NO tocar PPU/APU/scheduler** (Fase
-3+); DMA reales son Fase 5.
+**Fase 2 (bus mínimo + memoria + WRAM)** + **Fase 3 (scheduler + PPU
+timing-only)**. **NO tocar APU/DMA** (Fases 4/5); entrega de NMI/IRQ al CPU y
+rendering son Fase 4.
 
 Estado actual:
 
@@ -23,7 +24,7 @@ Estado actual:
   `/tmp/wdc/`): conjunto de instrucciones completo, modos de direccionamiento,
   conteo de ciclos exacto por instrucción (ciclo por ciclo).
 - ✅ Desensamblador integrado + trace helpers.
-- ✅ **Fase 2 (nuevo)**: bus completo LoROM/HiROM/ExHiROM + WRAM 128KB con
+- ✅ **Fase 2**: bus completo LoROM/HiROM/ExHiROM + WRAM 128KB con
   mirrors + SRAM (tamaño desde cabecera `$FFD8`) + registros base MMIO (mult/div
   `$4202-$4206`, WRAM port `$2180-$2183`, sombras PPU `$2100-$2133`, puertos
   APU `$2140-$217F`, registros DMA `$4300-$437F`, joypad stub) + open bus
@@ -33,13 +34,23 @@ Estado actual:
 - ✅ Harness de test `tools/cputest` que ejecuta `cputest-full.sfc`
   (1107 tests de CPU comunitarios) y `cputest-basic.sfc`.
 - ✅ **`cputest-full` y `cputest-basic` PASAN**: `SUCCESS: reached 0081a2`.
-- ✅ **Tests unitarios**: `snes_tests` = **26 TEST_CASE / 212 assertions** (CPU 8,
-  cartridge 7, bus 11) pasan 100%. Cobertura nueva de bus: routing por modo de
-  mapeo, mirrors WRAM/SRAM, mult/div (incl. división por cero y quirk RDDIV),
-  WRAM port auto-incremento, open bus, power/reset, DMA mirror `$43xF`→`$43xB`.
+- ✅ **Fase 3 (nuevo)**: scheduler relativo byuu (delta `int64`, sync de 4 en 4
+  master = 1 dot) + PPU timing-only (dot/scanline/frame NTSC, tabla de eventos
+  fullsnes H/V, flags `$4210` latched read/ack vs `$4212` live mirror, IRQ
+  register-note modos 1/2/3, HTIME/VTIME bracketed) + waitstates por región
+  (WS1 8, WS2 8→6 con `$420D`, WRAM/SRAM/exp. 8, I/O 6, joypad 12) con
+  `sync()` antes del acceso y `step(waitStates)` después.
+- ✅ **Test ROM propio** `tools/fase3` (generada en build-time): VBlank x10,
+  V-IRQ x10, NMI latch `$4210`==0x82 x10, HBlank 27/200 — pasa.
+- ✅ **Tests unitarios**: `snes_tests` = **40 TEST_CASE / 269133 assertions**
+  (CPU 8, cartridge 7, bus 13, scheduler 3, ppu timing 8 + integración)
+  pasan 100%. Ver §8.2 para erratas del diseño fase3 (HTIME/VTIME power =
+  0x1FF, eventos post-incremento, `$4212` bit6 en H=0 = 1).
 
-Fase 2 COMPLETADA. Próximos pasos (Fase 3): scheduler + PPU (consultar
-`fullsnes.txt`/`fullsnes.html` antes de implementar timing de CPU/PPU/APU/DMA).
+Fase 3 COMPLETADA. Próximos pasos (Fase 4): entrega real de NMI/IRQ al CPU
+(edge-detect, vectores, RTI — validar con blargg `nmi_test`/`irq_test`) +
+rendering PPU (consultar `fullsnes.txt`/`fullsnes.html` antes de implementar
+timing de CPU/PPU/APU/DMA).
 
 ---
 
@@ -333,14 +344,17 @@ despacho de interrupciones) y `System::load()` nunca llamaba `power()`.
 ## 5. Tests y validación
 
 - Ejecutables build tree: `build/core/tests/snes_tests` (doctest),
-  `build/tools/cputest/snes_cputest` (harness).
+  `build/tools/cputest/snes_cputest` (harness), `build/tools/fase3/snes_fase3`
+  (test ROM fase 3, ROM generada en build/tools/fase3/).
 - Comandos usados en esta sesión:
   - `cmake --build build` en el raíz.
-  - `./build/core/tests/snes_tests` → **26 TEST_CASE / 212 assertions**.
+  - `./build/core/tests/snes_tests` → **40 TEST_CASE / 269133 assertions**.
   - `./build/tools/cputest/snes_cputest third_party/cputest/cputest-full.sfc`
     → SUCCESS (`0081a2`).
   - `./build/tools/cputest/snes_cputest third_party/cputest/cputest-basic.sfc`
     → SUCCESS.
+  - `./build/tools/fase3/snes_fase3 build/tools/fase3/fase3_timing.sfc`
+    → SUCCESS (VBlank x10, V-IRQ x10, NMI ack x10, HBlank 27/173).
 - ROMs del harness versionadas en `third_party/cputest/` (antes en
   `/var/folders/.../opencode/snestests/cputest/`); su fuente de referencia
   (tests-full.inc, tests_table.inc) está en `/tmp/wdc/`.
@@ -361,6 +375,70 @@ despacho de interrupciones) y `System::load()` nunca llamaba `power()`.
    `docs/update.md` (historial de bugs) y los tests de cputest verdes.
 4. **NO ampliar alcance**: si una solución necesita tocar PPU/APU/scheduler,
    PARAR y avisar. Solo fase 0/1/2.
+
+## 8. Fase 3 — Scheduler + PPU timing-only (COMPLETADA)
+
+Diseño: `docs_documentacion/fase3_scheduler_diseno.md`; fuentes de verdad:
+`fullsnes.txt` (I/O map columna derecha, "SNES Timing Oscillators / H/V
+Counters / H/V Events") y `fullsnes.html`.
+
+### 8.1 Implementado
+
+- **Scheduler relativo byuu** (`core/src/scheduler/`): `Thread` (pasivo,
+  `step(masterCycles)`), `Scheduler` con delta `int64` — `step()` acumula,
+  `sync()` avanza de 4 en 4 (un dot). `System::step()` = instrucción + sync
+  final.
+- **PPU timing-only** (`core/src/ppu/`): dot = 4 master, scanline = 341 dots,
+  frame NTSC = 262 líneas. Eventos evaluados al ENTRAR en el dot (los
+  contadores primero, los flags después — un `lda $4212` en H=0,V=225 ya ve
+  bit7 set). Tabla de eventos fullsnes:
+  - VBlank set H=0,V=225; limpieza+auto-ack NMI H=0,V=0.
+  - HBlank set H=274, clear H=1 → set durante H=274..340 y H=0 (¡bit6 de
+    $4212 = 0xC0 en H=0 dentro de VBlank, no 0x80!).
+  - IRQ flag modo 1/2/3 (`$4200` bits 5-4) con semántica register-note:
+    H==HTIME cualquier V / V==VTIME con H=0 / ambos. Latch hasta read/ack
+    o disable IRQ. Disable NMI NO toca el latch de `$4210`.
+- **Registros**: `$4210` RDNMI latch read/ack + versión CPU 0x02; `$4211`
+  TIMEUP latch read/ack; `$4212` HVBJOY espejo LIVE (nunca clear-on-read);
+  `$4200/$4207-$420A` delegados desde el bus. `$4200` = 0x00 en power/reset;
+  HTIME/VTIME (bracketed) sobreviven al reset soft.
+- **Waitstates** (`Bus::waitStates`): WRAM/SRAM/expansión 8, B-Bus/CPU I/O 6,
+  joypad `$4000-$41FF` 12, WS2 8→6 con `$420D` bit0, WS1 fijo 8; idle CPU 6.
+  El CPU hace `sync()` ANTES del acceso y `step(waitStates)` después.
+- **Test ROM propio** (`tools/fase3/`): builder Python (ensamblador 2 pasadas)
+  + runner `snes_fase3`. Conteos exactos: VBlank x10 (por `$4212`, nunca
+  `$4210`), V-IRQ x10 (modo 2, VTIME=100, read/ack), NMI latch `$4210`==0x82
+  x10, HBlank 27/200 muestras (rango 5-45% — valida rango, no conteo bruto).
+
+### 8.2 Erratas vs fase3_scheduler_diseno.md
+
+1. **Power-on HTIME/VTIME = 0x1FF** (fullsnes `4207h=(FFh) 4208h=(01h)`), no 0
+   como decía §7.7 del doc.
+2. **Eventos al entrar en el dot**: la evaluación debe ser post-incremento;
+   con pre-incremento el flag tarda un dot en aparecer (primer fix de la
+   sesión).
+3. **Evento NMI en H=0.5** indistinguible a granularidad de dot → mismo dot
+   que VBlank (documentado en `ppu.hpp`).
+4. **`$4212` bit6 en H=0 es 1** (HBlank H=274..340,0) — tests iniciales
+   esperaban 0x80/0x00 y debían ser 0xC0/0x40.
+5. cputest-full registra 2237844 instrucciones (el `240228` del resumen de
+   Fase 2 era de una corrida parcial); el criterio es el mismo: SUCCESS en
+   `0081a2`.
+
+### 8.3 Validación (todo verde al cierre)
+
+```bash
+cmake --build build
+./build/core/tests/snes_tests        # 40 TEST_CASE / 269133 assertions
+./build/tools/cputest/snes_cputest third_party/cputest/cputest-full.sfc   # SUCCESS 0081a2
+./build/tools/cputest/snes_cputest third_party/cputest/cputest-basic.sfc  # SUCCESS
+./build/tools/fase3/snes_fase3 build/tools/fase3/fase3_timing.sfc         # SUCCESS
+```
+
+- La ROM de fase3 se genera en build-time (CMake custom command, Python3).
+- Pendiente para Fase 4 (o 3b): entrega real de NMI/IRQ al CPU (edge-detect
+  interno, vectores, RTI) — blargg `nmi_test`/`irq_test`; rendering; latches
+  `$213C-$213F`; líneas largas/cortas (341/342/340); PAL.
 
 ## Cómo compilar/unir todo
 - `cd snes-emu && cmake --build build` (o `make -C build`).

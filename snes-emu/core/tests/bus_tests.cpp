@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "snes/snes.hpp"
+#include "ppu/ppu.hpp"
 
 // Build a cart of the given map mode with its header set; sramExp 0 means the
 // header advertises no battery SRAM (tests that need SRAM pass 3 = 8KB).
@@ -24,7 +25,8 @@ static snes::Cartridge makeCart(snes::MapMode mode, size_t size, snes::uint8 sra
 
 TEST_CASE("bus: LoROM routing (ROM windows, SRAM, WRAM)") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x400000, 0x03);  // 4MB + 8KB SRAM
-  snes::Bus bus(cart);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
   bus.power();
 
   // Banks 40-5F mirror banks 00-3F:8000; 60-7D continue linearly.
@@ -58,7 +60,8 @@ TEST_CASE("bus: LoROM routing (ROM windows, SRAM, WRAM)") {
 
 TEST_CASE("bus: HiROM routing (ROM windows, WRAM mirrors, SRAM)") {
   snes::Cartridge cart = makeCart(snes::MapMode::hirom, 0x400000, 0x03);  // 4MB + 8KB SRAM
-  snes::Bus bus(cart);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
   bus.power();
 
   CHECK(bus.read(0x400000) == 0xEA);
@@ -93,7 +96,8 @@ TEST_CASE("bus: HiROM routing (ROM windows, WRAM mirrors, SRAM)") {
 
 TEST_CASE("bus: ExHiROM routing (two 4MB halves, no SRAM window)") {
   snes::Cartridge cart = makeCart(snes::MapMode::exhirom, 0x600000);  // 6MB, no SRAM
-  snes::Bus bus(cart);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
   bus.power();
 
   CHECK(bus.read(0x400000) == 0xEA);
@@ -111,7 +115,8 @@ TEST_CASE("bus: ExHiROM routing (two 4MB halves, no SRAM window)") {
 
 TEST_CASE("bus: multiply and divide ports") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
-  snes::Bus bus(cart);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
   bus.power();
 
   // $4202/$4203 WRMPYA/WRMPYB: 0x12 * 0x34 = 0x3A8.
@@ -144,7 +149,8 @@ TEST_CASE("bus: multiply and divide ports") {
 
 TEST_CASE("bus: WRAM port via $2180-$2183") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
-  snes::Bus bus(cart);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
   bus.power();
 
   // 17-bit address: WMADDL/WMADDM/WMADDH.
@@ -173,7 +179,8 @@ TEST_CASE("bus: WRAM port via $2180-$2183") {
 
 TEST_CASE("bus: PPU write-only shadows and open-bus reads") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
-  snes::Bus bus(cart);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
   bus.power();
 
   bus.write(0x002100, 0x0F);
@@ -192,7 +199,8 @@ TEST_CASE("bus: PPU write-only shadows and open-bus reads") {
 
 TEST_CASE("bus: APU ports R/W with mirroring") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
-  snes::Bus bus(cart);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
   bus.power();
 
   bus.write(0x002140, 0x55);
@@ -208,7 +216,8 @@ TEST_CASE("bus: APU ports R/W with mirroring") {
 
 TEST_CASE("bus: DMA channel registers and $43xF mirror") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
-  snes::Bus bus(cart);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
   bus.power();
 
   // Power-on: DMAPx=FF, A1Bx undefined (fullsnes xxh) -> FF in this impl.
@@ -228,7 +237,8 @@ TEST_CASE("bus: DMA channel registers and $43xF mirror") {
 
 TEST_CASE("bus: open bus reflects the last data-bus byte") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
-  snes::Bus bus(cart);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
   bus.power();
 
   bus.write(0x7E0000, 0xAB);
@@ -242,7 +252,8 @@ TEST_CASE("bus: open bus reflects the last data-bus byte") {
 
 TEST_CASE("bus: power and reset register semantics") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
-  snes::Bus bus(cart);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
 
   bus.power();
   // Power-on values from fullsnes (bracketed [=] only at power-on).
@@ -273,17 +284,104 @@ TEST_CASE("bus: power and reset register semantics") {
   CHECK(bus.cpuRegister(0x00) == 0x81);
 }
 
-TEST_CASE("bus: $4210 vblank flag and CPU version") {
+TEST_CASE("bus: $4210 RDNMI read/ack vs $4212 live mirror (PPU)") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
-  snes::Bus bus(cart);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
+  bus.power();
+  ppu.power();
+
+  // No VBlank yet: RDNMI is version 2 with bit7 clear; repeated reads stay 0.
+  CHECK(bus.read(0x004210) == 0x02);
+  CHECK(bus.read(0x004210) == 0x02);
+  CHECK(bus.read(0x004212) == 0x00);
+
+  // Drive the PPU into VBlank (V=225): 225 scanlines of 341 dots each.
+  ppu.step(225ull * 341 * 4);
+
+  // $4212 is a live mirror: bit7 stays set across repeated reads. Bit6
+  // (HBlank) is also live and set at dot 0 (clears at H=1), so 0xC0.
+  CHECK(bus.read(0x004212) == 0xC0);
+  CHECK(bus.read(0x004212) == 0xC0);
+  // $4210 is a latched Read/Ack flag: the first read clears it.
+  CHECK(bus.read(0x004210) == 0x82);
+  CHECK(bus.read(0x004210) == 0x02);
+
+  // End of VBlank (V=0): both flags clear; NMI flag auto-acks too.
+  ppu.step((262 - 225) * 341 * 4);
+  CHECK(bus.read(0x004212) == 0x40);  // bit7 clear, bit6 HBlank live at dot 0
+  CHECK(bus.read(0x004210) == 0x02);
+}
+
+TEST_CASE("bus: $4200/$4209/$420A -> PPU V-IRQ, $4211 read/ack") {
+  snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
+  bus.power();
+  ppu.power();
+
+  // Enable V-IRQ at VTIME=100 (mode 2): $4200 = $20, $4209/$420A = 100.
+  bus.write(0x004200, 0x20);
+  bus.write(0x004209, 100);
+  bus.write(0x00420A, 0x00);
+
+  // Step to just before V=100.
+  ppu.step(100ull * 341 * 4 - 4);
+  CHECK(bus.read(0x004211) == 0x00);  // not yet
+
+  // Entering V=100, H=0 triggers the IRQ flag; read/ack clears it.
+  ppu.step(4);
+  CHECK(bus.read(0x004211) == 0x80);
+  CHECK(bus.read(0x004211) == 0x00);
+  // No retrigger within the same scanline.
+  ppu.step(4);
+  CHECK(bus.read(0x004211) == 0x00);
+
+  // Disabling IRQs ($4200 bits 5-4 -> 0) also acknowledges them.
+  ppu.step(262ull * 341 * 4);  // next frame: V=100 triggers again
+  CHECK(bus.read(0x004211) == 0x80);
+  bus.write(0x004200, 0x00);
+  CHECK(bus.read(0x004211) == 0x00);
+}
+
+TEST_CASE("bus: waitstates per memory region (fullsnes memory map)") {
+  snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x400000, 0x03);
+  snes::Ppu ppu;
+  snes::Bus bus(cart, ppu);
   bus.power();
 
-  // RDNMI: version 2 in bits 3-0, alternating vblank flag in bit7.
-  CHECK(bus.read(0x004210) == 0x02);
-  CHECK(bus.read(0x004210) == 0x82);
-  // $4211 TIMEUP alternates on the same toggle.
-  CHECK(bus.read(0x004211) == 0x00);
-  CHECK(bus.read(0x004211) == 0x80);
-  CHECK(bus.read(0x004212) == 0x00);  // HVBJOY idle
-  CHECK(bus.read(0x00421A) == 0x00);  // joypad none
+  // WRAM + mirrors: 8.
+  CHECK(bus.waitStates(0x7E0000) == 8);
+  CHECK(bus.waitStates(0x7F8000) == 8);
+  CHECK(bus.waitStates(0x001000) == 8);
+  // Unused + B-Bus I/O + CPU I/O: 6.
+  CHECK(bus.waitStates(0x002000) == 6);
+  CHECK(bus.waitStates(0x002100) == 6);
+  CHECK(bus.waitStates(0x004200) == 6);
+  // Manual joypad: 12.
+  CHECK(bus.waitStates(0x004016) == 12);
+  CHECK(bus.waitStates(0x0041FF) == 12);
+  // Expansion/SRAM window: 8.
+  CHECK(bus.waitStates(0x006000) == 8);
+
+  // WS1 LoROM (00-3F:8000-FFFF): fixed 8.
+  CHECK(bus.waitStates(0x008000) == 8);
+  CHECK(bus.waitStates(0x3F8000) == 8);
+  // WS1 HiROM (40-7D): fixed 8.
+  CHECK(bus.waitStates(0x400000) == 8);
+  CHECK(bus.waitStates(0x7D0000) == 8);
+
+  // WS2 (80-BF:8000-FFFF, C0-FF): 8 by default, 6 after $420D bit0.
+  CHECK(bus.waitStates(0x808000) == 8);
+  CHECK(bus.waitStates(0xC00000) == 8);
+  bus.write(0x00420D, 0x01);
+  CHECK(bus.waitStates(0x808000) == 6);
+  CHECK(bus.waitStates(0xC00000) == 6);
+  // WS1 unaffected by MEMSEL.
+  CHECK(bus.waitStates(0x008000) == 8);
+  CHECK(bus.waitStates(0x400000) == 8);
+  // Reset restores SlowROM.
+  bus.reset();
+  CHECK(bus.waitStates(0x808000) == 8);
+  CHECK(bus.waitStates(0xC00000) == 8);
 }

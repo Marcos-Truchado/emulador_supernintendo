@@ -4,6 +4,8 @@ add_library(snes_core STATIC
   src/cartridge/cartridge.cpp
   src/bus/bus.cpp
   src/system/system.cpp
+  src/scheduler/scheduler.cpp
+  src/ppu/timing.cpp
   src/cpu/cpu65816.cpp
   src/cpu/algorithms.cpp
   src/cpu/opcodes.cpp
@@ -15,5 +17,6 @@ add_library(snes_core STATIC
   src/cpu/disassembler.cpp
 )
 target_include_directories(snes_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(snes_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_subdirectory(tests)

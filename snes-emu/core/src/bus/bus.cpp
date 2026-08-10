@@ -1,5 +1,7 @@
 #include "snes/snes.hpp"
 
+#include "ppu/ppu.hpp"
+
 #include <algorithm>
 
 namespace snes {
@@ -197,17 +199,9 @@ uint8 Bus::mmioRead(uint24 address) {
   // CPU read-only status $4210-$421F.
   if (offs <= 0x421F) {
     switch (offs) {
-      case 0x4210: {  // RDNMI: vblank flag (stub) + 5A22 version 2
-        uint8 v = (vblankToggle_ ? 0x80 : 0x00) | 0x02;
-        vblankToggle_ = !vblankToggle_;
-        return latch(v);
-      }
-      case 0x4211: {  // TIMEUP: IRQ flag stub, alternates for wait loops
-        uint8 v = vblankToggle_ ? 0x80 : 0x00;
-        vblankToggle_ = !vblankToggle_;
-        return latch(v);
-      }
-      case 0x4212: return latch(0x00);  // HVBJOY: no vblank/hblank/busy
+      case 0x4210: return latch(ppu_.read4210());  // RDNMI (Read/Ack)
+      case 0x4211: return latch(ppu_.read4211());  // TIMEUP (Read/Ack)
+      case 0x4212: return latch(ppu_.read4212());  // HVBJOY (live)
       case 0x4213: return latch(0x00);  // RDIO
       case 0x4214: return latch(divQuotient_ & 0xFF);
       case 0x4215: return latch(divQuotient_ >> 8);
@@ -266,6 +260,7 @@ void Bus::mmioWrite(uint24 address, uint8 data) {
 void Bus::writeCpuRegister(uint8 offset, uint8 data) {
   cpuReg_[offset] = data;
   switch (offset) {
+    case 0x00: ppu_.write4200(data); break;  // NMITIMEN (disabling IRQs acks)
     case 0x02: mpyA_ = data; break;  // WRMPYA
     case 0x03: {                     // WRMPYB: start 8x8 unsigned multiply
       mathResult_ = uint16(mpyA_) * data;
@@ -285,7 +280,73 @@ void Bus::writeCpuRegister(uint8 offset, uint8 data) {
       }
       break;
     }
-    default: break;  // 4200/4201/4207-420D: storage only (Phase 3/5)
+    case 0x07: ppu_.write4207(data); break;  // HTIMEL
+    case 0x08: ppu_.write4208(data); break;  // HTIMEH
+    case 0x09: ppu_.write4209(data); break;  // VTIMEL
+    case 0x0A: ppu_.write420A(data); break;  // VTIMEH
+    case 0x0D: break;  // MEMSEL: stored in cpuReg_ (waitStates reads bit0)
+    default: break;  // 4201 WRIO: storage only
+  }
+}
+
+// ---- waitstates (phase 3, fullsnes "Overall Memory Map" + MEMSEL) ----
+//
+// CPU access time in master cycles per address:
+//   $0000-$1FFF / 7E-7F WRAM .......... 8  (2.68MHz)
+//   $2000-$20FF, $2200-$3FFF unused ... 6  (3.58MHz)
+//   $2100-$21FF B-Bus I/O ............. 6
+//   $4000-$41FF manual joypad ......... 12 (1.78MHz)
+//   $4200-$5FFF I/O ................... 6
+//   $6000-$7FFF expansion/SRAM ........ 8
+//   00-3F:8000-FFFF WS1 LoROM ......... 8 FIXED (never switches)
+//   40-7D:0000-FFFF WS1 HiROM ......... 8 FIXED
+//   80-BF:8000-FFFF WS2 LoROM ......... 8/6 by $420D bit0
+//   C0-FF:0000-FFFF WS2 HiROM ......... 8/6 by $420D bit0
+// The header $7FD5 bit4 is only informative; MEMSEL rules at runtime.
+// SRAM windows (LoROM 70-7D/F0-FF, HiROM 20-3F/A0-BF) sit inside the
+// 2.68MHz rows above, so they are always 8.
+auto Bus::waitStates(uint24 address) -> uint8 {
+  uint32 bank = address >> 16;
+  uint32 offs = address & 0xFFFF;
+
+  if (bank == 0x7E || bank == 0x7F) return 8;  // WRAM
+  // HiROM WRAM mirrors 3E-3F/BE-BF.
+  if (cartridge_.mapMode() == MapMode::hirom &&
+      (bank == 0x3E || bank == 0x3F || bank == 0xBE || bank == 0xBF)) {
+    return 8;
+  }
+
+  // System banks 00-3F / 80-BF.
+  if (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF)) {
+    if (offs < 0x2000) return 8;    // 8K WRAM mirror
+    if (offs < 0x2100) return 6;    // unused
+    if (offs < 0x2200) return 6;    // B-Bus I/O
+    if (offs < 0x4000) return 6;    // unused
+    if (offs < 0x4200) return 12;   // manual joypad I/O
+    if (offs < 0x6000) return 6;    // I/O
+    if (offs < 0x8000) return 8;    // expansion / SRAM
+    // 8000-FFFF: WS1 (00-3F, fixed 8) vs WS2 (80-BF, switchable).
+    return bank >= 0x80 && (cpuReg_[0x0D] & 1) ? 6 : 8;
+  }
+
+  switch (cartridge_.mapMode()) {
+    case MapMode::lorom:
+      if ((bank >= 0x40 && bank <= 0x7D) || (bank >= 0xC0 && bank <= 0xFF)) {
+        // SRAM banks 70-7D/F0-FF:0000-7FFF -> 2.68MHz row, fixed 8.
+        if (!sram_.empty() && (bank & 0x3F) >= 0x30 && (bank & 0x3F) <= 0x3D &&
+            offs < 0x8000) {
+          return 8;
+        }
+        return bank >= 0xC0 && (cpuReg_[0x0D] & 1) ? 6 : 8;  // C0-FF WS2
+      }
+      return 6;  // unmapped: open-bus access at I/O speed
+    case MapMode::hirom:
+    case MapMode::exhirom:
+      if (bank >= 0x40 && bank <= 0x7D) return 8;  // WS1 HiROM fixed
+      if (bank >= 0xC0) return (cpuReg_[0x0D] & 1) ? 6 : 8;  // WS2 HiROM
+      return 6;  // unmapped: open-bus access at I/O speed
+    default:
+      return 6;
   }
 }
 
@@ -296,7 +357,6 @@ void Bus::power() {
   sram_.assign(cartridge_.sramSize(), 0);
 
   lastData_ = 0;
-  vblankToggle_ = false;
   wramAddr_ = 0;
   mpyA_ = 0xFF;
   divDividend_ = 0;
@@ -317,14 +377,9 @@ void Bus::power() {
 
 void Bus::reset() {
   // Soft reset only touches un-bracketed values (fullsnes): bracketed
-  // registers keep whatever the game left in them.
-  vblankToggle_ = false;
+  // registers (WRIO/HTIME/VTIME) keep whatever the game left in them.
   cpuReg_[0x00] = 0x00;  // 4200 NMITIMEN (disables NMI/IRQ/joypad)
   cpuReg_[0x01] = 0xFF;  // 4201 WRIO
-  cpuReg_[0x07] = 0xFF;  // 4207 HTIMEL
-  cpuReg_[0x08] = 0x01;  // 4208 HTIMEH
-  cpuReg_[0x09] = 0xFF;  // 4209 VTIMEL
-  cpuReg_[0x0A] = 0x01;  // 420A VTIMEH
   cpuReg_[0x0B] = 0x00;  // 420B MDMAEN
   cpuReg_[0x0C] = 0x00;  // 420C HDMAEN
   cpuReg_[0x0D] = 0x00;  // 420D MEMSEL

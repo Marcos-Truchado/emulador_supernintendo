@@ -32,10 +32,16 @@ class Memory {
   virtual ~Memory() = default;
   virtual auto read(uint24 address) -> uint8 = 0;
   virtual auto write(uint24 address, uint8 data) -> void = 0;
+  // Master-clock waitstate cost of one bus access at `address` (6/8/12
+  // on real hardware; phase 3 timing). The CPU's scheduler steps this.
+  virtual auto waitStates(uint24 address) -> uint8 { return 6; }
 };
 
 // What the frontend / test harness needs from the CPU in phase 1.
 class Cpu65816;
+class Thread;
+class Scheduler;
+class Ppu;
 
 enum class MapMode {
   unknown,
@@ -72,17 +78,20 @@ class Cartridge {
 
 // Full SNES memory map bus: LoROM/HiROM/ExHiROM routing, 128KB WRAM, SRAM,
 // and the base MMIO registers (CPU on-chip, PPU/APU stubs, WRAM port).
-// PPU/APU are not implemented yet (Phase 2): PPU registers are write-only
-// shadows, APU ports are plain storage, DMA registers are R/W storage for
-// Phase 5. Unmapped reads return open bus (the last byte on the data bus,
-// tracked in lastData_); $4210/$4211 alternate bit7 so wait_for_vblank loops
-// in the community CPU test ROMs terminate.
+// PPU timing registers are delegated to the Ppu (phase 3): reads of
+// $4210/$4211/$4212 and writes of $4200/$4207-$420A go to the PPU, which
+// owns the H/V counters, VBlank/HBlank flags and IRQ logic. $420D MEMSEL
+// is stored here (bit0 selects the WS2 waitstate, 0 = 2.68MHz on reset).
+// APU ports are plain storage, DMA registers are R/W storage for Phase 5.
+// Unmapped reads return open bus (the last byte on the data bus, tracked
+// in lastData_).
 class Bus : public Memory {
  public:
-  explicit Bus(Cartridge& cartridge) : cartridge_(cartridge) {}
+  explicit Bus(Cartridge& cartridge, Ppu& ppu) : cartridge_(cartridge), ppu_(ppu) {}
 
   auto read(uint24 address) -> uint8 override;
   auto write(uint24 address, uint8 data) -> void override;
+  auto waitStates(uint24 address) -> uint8 override;
 
   // Power-on and soft-reset register values (fullsnes I/O map right column:
   // bracketed values survive reset, only power-on sets them).
@@ -115,10 +124,10 @@ class Bus : public Memory {
   uint8 latch(uint8 value);  // put value on the data bus (open-bus tracking)
 
   Cartridge& cartridge_;
+  Ppu& ppu_;
   std::vector<uint8> wram_ = std::vector<uint8>(128 * 1024);
   std::vector<uint8> sram_;
   uint8 lastData_ = 0;
-  bool vblankToggle_ = false;  // alternates $4210/$4211 bit7 (Phase 2 stub)
 
   uint8 ppuReg_[0x34] = {};  // $2100-$2133 write shadows
   uint8 apuPort_[4] = {};    // $2140-$2143
@@ -131,7 +140,10 @@ class Bus : public Memory {
   uint16 mathResult_ = 0;    // $4216/$4217 product or remainder
 };
 
-// System facade: wires cartridge + bus + CPU, exposes step/run/reset.
+// System facade: wires cartridge + bus + PPU + scheduler + CPU, exposes
+// step/run/reset. Phase 3: step() runs one instruction with the CPU as
+// conductor (each bus access subtracts waitstates from the scheduler delta
+// and syncs the PPU); the PPU advances dot by dot (4 master cycles).
 class System {
  public:
   System();
@@ -142,9 +154,9 @@ class System {
 
   auto load(const std::string& filename, std::string* error = nullptr) -> bool;
 
-  // Reset the CPU and load the reset vector from the bus.
+  // Reset the CPU (and PPU/scheduler) and load the reset vector from the bus.
   auto reset() -> void;
-  // Execute exactly one instruction; returns the number of cycles it took.
+  // Execute exactly one instruction; returns the CPU cycles it took.
   auto step() -> uint64;
   // Execute up to maxCycles cycles; stops early if the CPU halts (STP/WAI).
   auto run(uint64 maxCycles) -> uint64;
@@ -155,9 +167,15 @@ class System {
   auto bus() const -> const Bus&;
   auto cartridge() -> Cartridge&;
   auto cartridge() const -> const Cartridge&;
+  auto ppu() -> Ppu&;
+  auto ppu() const -> const Ppu&;
+  auto scheduler() -> Scheduler&;
+  auto scheduler() const -> const Scheduler&;
 
  private:
   std::unique_ptr<Cartridge> cartridge_;
+  std::unique_ptr<Ppu> ppu_;
+  std::unique_ptr<Scheduler> scheduler_;
   std::unique_ptr<Bus> bus_;
   std::unique_ptr<Cpu65816> cpu_;
 };

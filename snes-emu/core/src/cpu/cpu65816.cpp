@@ -8,27 +8,40 @@ namespace snes {
 //====================================================================
 // 1-cycle memory operations.
 //
-// The host bus (mem_) is stepped once per CPU cycle; FastROM/slowROM
-// scaling and scheduler catch-up live in a later phase, so each bus
-// access here counts as exactly one cycle. This reproduces the classic
-// 65816 instruction cycle tables (e.g. LDA #imm = 2 cycles).
+// cycles_ counts CPU cycles (one per access, the classic 65816 tables).
+// On top of that, the scheduler tracks master-clock time: the CPU is the
+// conductor (fase3 doc §5.1) and every access subtracts its waitstate
+// cost from the scheduler delta, then syncs the PPU to the current dot.
 //
-// Ported cycle-for-cycle from the higan/bsnes WDC65816 core memory.cpp.
+// Internal (idle) cycles run at 3.58MHz = 6 master cycles (fullsnes CPU
+// Clock Notes). Bus accesses pay 6/8/12 master cycles per address via
+// Memory::waitStates (fullsnes Overall Memory Map + MEMSEL).
+//
+// Sync order: the PPU is caught up BEFORE the bus access lands, so reads
+// of $4210/$4211/$4212 observe the PPU in the exact dot of the access
+// (fase3 doc §5.2) — the polling-loop pattern on $4212 depends on this.
 //====================================================================
 
 auto Cpu65816::idle() -> uint8 {
   cycles_++;
+  scheduler_.sync();
+  scheduler_.step(6);  // internal cycle, 3.58MHz
   return 0;
 }
 
 auto Cpu65816::read(uint24 address) -> uint8 {
   cycles_++;
-  return mem_.read(address & 0xffffff);
+  scheduler_.sync();
+  uint8 data = mem_.read(address & 0xffffff);
+  scheduler_.step(mem_.waitStates(address));
+  return data;
 }
 
 auto Cpu65816::write(uint24 address, uint8 data) -> void {
   cycles_++;
+  scheduler_.sync();
   mem_.write(address & 0xffffff, data);
+  scheduler_.step(mem_.waitStates(address));
 }
 
 // immediate, 2-cycle opcodes with idle cycle will become bus read
