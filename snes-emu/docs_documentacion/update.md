@@ -1,6 +1,6 @@
 # Estado del proyecto — Fases 3/3b + 4 (PPU rendering, en curso)
 
-**Última actualización:** 2026-08-12
+**Última actualización:** 2026-08-13
 
 Este documento es el punto de recuperación de contexto para cualquier IA que
 continúe el proyecto. Léelo íntegro **antes** de tocar el código. La fuente de
@@ -545,22 +545,22 @@ borde, copiada en `docs_documentacion/refs/`):
 ```bash
 cmake --build build --target snes_tests        # desde snes-emu/
 ./build/core/tests/snes_tests --test-case="ppu:*"
-# 40 test cases | 37 passed | 3 failed | 34 skipped (los 34 son cpu/bus/cart/
+# 51 test cases | 51 passed | 0 failed | 34 skipped (los 34 son cpu/bus/cart/
 # scheduler/interrupt, no correr con el filtro ppu:*)
-# assertions: 269062 | 269053 passed | 9 failed
+# assertions: 269174 | 269174 passed | 0 failed
+./build/core/tests/snes_tests                 # suite completa
+# 85 test cases | 85 passed | 0 failed | assertions: 269463
+# cputest-full/basic y la ROM de fase 3 siguen verdes (validación §8.3)
 ```
 
-Los 3 test cases en ROJO (y sus 9 assertions) son:
+**TODO VERDE (2026-08-13)**: los 11 test cases de sprites/OAM
+(`ppu_sprite_tests.cpp`) están en verde — ver §10.9. La suite completa pasa
+**85/85 test cases / 269463 assertions**.
 
-| Test | Líneas rojas | Causa raíz (diagnosticada) |
-|---|---|---|
-| `ppu: mode 5 hires…` | 332 (hp0), 339 (hp8), 342 (pixelColor(3,1)) | (1) pickSub devuelve 0 en hires sin color math (ver §10.4 bug A); (2) hp8 = tile 1 = char+1 cuyo tile-data el test no escribió (ver §10.4 bug B); (3) la aserción 342 usa el índice equivocado (ver §10.4 bug B) |
-| `ppu: mode 6 hires…` | 370 (26+0), 371 (26+16), 372 (26+32) | (1) mismo bug A en dot 14; (2)+(3) los datos de los chars 1 y 2 están en direcciones equivocadas del test (ver §10.4 bug C) |
-| `ppu: INIDISP forced blank…` | 429, 433, 439 | Bug de FIXTURE: `paint(1,0)` repetido no avanza ningún dot → el framebuffer conserva el píxel viejo (ver §10.4 bug D) |
-
-El render de fondos modos 0-3, 6 y 7 está implementado y verificado para
-modos 0-3 + mosaic; hires (5/6) y sprites/modo 7/ventanas NO tienen tests
-verdes todavía (ver §10.5).
+**TODO VERDE (2026-08-12)**: los 3 test cases que estaban en rojo (`mode 5
+hires`, `mode 6 hires`, `INIDISP forced blank`) pasan. Los 9 fallos de §10.4
+están resueltos — el único que exigió tocar el core era Bug A (pickSub);
+el resto eran bugs de test (ver §10.8).
 
 ## 10.2 HECHO Y COMPROBADO (verde — NO re-depurar)
 
@@ -574,10 +574,10 @@ verdes todavía (ver §10.5).
   loadPlanes/draw/mode7Draw/resetState), `fetchSlot` (tablas de slots por
   modo 0-7), `paintDot`, `Composer` (lineStart/emitPixel/pickSub/pickMain/
   mixColors/lookupColor/lookupDirectColor/coldataColor/resetState),
-  `WindowMask` (lineStart/stepPixel/maskHit/resetState), `Mosaic`
-  (lineStart/resetState/active en io.cpp), `SpriteEngine`
-  (newFrame/lineStart/touchesLine/probe/draw/loadTiles/resetState — portado
-  de ares, sin tests todavía).
+   `WindowMask` (lineStart/stepPixel/maskHit/resetState), `Mosaic`
+   (lineStart/resetState/active en io.cpp), `SpriteEngine`
+   (newFrame/lineStart/touchesLine/probe/draw/loadTiles/resetState — portado
+   de ares, con tests desde 2026-08-13, ver §10.9).
 - **Test fixture `BgFixture`** (`core/tests/ppu_bg_tests.cpp:17-56`) — pieza
   clave, ver §10.6 invariantes.
 - **10 test cases GREEN** (verifican fondos): mode 0 (2bpp básico, paleta/
@@ -598,10 +598,6 @@ verdes todavía (ver §10.5).
 ## 10.3 HECHO pero SIN COMPROBAR (implementado, sin test verde)
 
 Estos existen en el código (portados de ares) pero **no tienen ningún test**:
-- **Sprites**: `probe()/draw()/loadTiles()` completos (render.cpp:331-476),
-  range/time overflow flags, nameselect, flips, interlace de sprites.
-  Falta `ppu_sprite_tests.cpp` (TDD: items por línea, prioridades, overflows,
-  sizes 8x8..64x64).
 - **Modo 7**: `Layer::mode7Draw()` completo (render.cpp:233-302) — matriz
   A/B/C/D, center, flips, repeat modes, EXTBG. **Sin test** (los checks
   `0x0000/0x7FFF/0x001F` del test INIDISP NO son modo 7; el plan original
@@ -623,7 +619,7 @@ Estos existen en el código (portados de ares) pero **no tienen ningún test**:
 - **mode 4** (8bpp + offset-per-tile): `fetchSlot` case 4 existe; sin test.
 - **Búsqueda de tiles del 0x2100 para el puerto OAM…**: no, esto no aplica.
 
-## 10.4 Diagnóstico de los 9 fallos restantes (NO re-depurar desde cero)
+## 10.4 Diagnóstico de los fallos (RESUELTO — ver §10.8 para el cierre)
 
 ### Bug A — `Composer::pickSub` en hires sin color math devuelve 0
 Síntoma: en mode 5/6 los half-píxeles pares (sub screen) del **primer dot de
@@ -728,20 +724,15 @@ Esto comprueba que el render en blank sí escribe negro (los picks devuelven
 
 ## 10.5 Próximos pasos (en orden)
 
-1. Fix A (pickSub passthrough) + recompilar + correr `--test-case="ppu:*"`
-   → mode 5/6 bajan a 0 fallos de los 6 de hires… (quedan los de test: B y C).
-2. Fix tests B y C (datos char 1/2 + índice 342) y D (INIDISP x siguientes).
-   Objetivo: `--test-case="ppu:*"` → 40/40.
-3. Correr `./build/core/tests/snes_tests` completo (sin filtro): los 34
-   test cases no-ppu (cpu/bus/cart/scheduler/interrupt) deben seguir verdes
-   (no se ha tocado nada de ellos).
-4. Commit (estado actual: `render.cpp`, `io.cpp`, `ppu_bg_tests.cpp`,
-   `ppu_mmio_tests.cpp` sin trackear; `ppu.hpp`, `timing.cpp`,
-   `CMakeLists.txt` modificados).
-5. Fase 4 siguiente: TDD sprites → modo 7 → ventanas + color math → mode 4 /
-   interlace / pseudoHires (ver `fase4_estado_plan.md` §4).
+1. ✅ Fix A (pickSub passthrough) + fixes de test B/C/D → `--test-case="ppu:*"` → 40/40.
+2. ✅ Suite completa sin filtro: 74/74 (cpu/bus/cart/scheduler/interrupt verdes).
+3. ✅ cputest-full/basic + ROM fase 3 siguen verdes.
+4. ✅ **TDD sprites/OAM** (`ppu_sprite_tests.cpp`, 11 test cases) — ver §10.9.
+5. Fase 4 siguiente: modo 7 → ventanas + color math → mode 4 / interlace /
+   pseudoHires (ver `fase4_estado_plan.md` §4).
 6. Limpieza opcional al final: quitar prints de depuración (todos tras
    `getenv("PPU_DEBUG")`), el guard de runaway de `Ppu::step` y `ppuDebug()`.
+   (Hecho: el print `map2` temporal de depuración del bug E se eliminó.)
 
 ## 10.6 Invariantes verificadas (NO re-verificar)
 
@@ -788,9 +779,10 @@ Esto comprueba que el render en blank sí escribe negro (los picks devuelven
 | `core/src/ppu/io.cpp` | NUEVO — MMIO completo (fase 4 §1 del plan) + acceso VRAM/OAM/CGRAM |
 | `core/src/ppu/ppu.hpp` | Arquitectura motores + contrato timing (modificado) |
 | `core/src/ppu/timing.cpp` | advanceDot cableado al render + runaway guard (modificado) |
-| `core/tests/ppu_bg_tests.cpp` | 13 test cases fondos: 10 verdes, 3 rojos (bug A-D) |
+| `core/tests/ppu_bg_tests.cpp` | 13 test cases fondos: **13 verdes** |
 | `core/tests/ppu_mmio_tests.cpp` | 21 test cases MMIO verdes |
-| `core/CMakeLists.txt` / `tests/CMakeLists.txt` | incluyen render.cpp y ppu_bg_tests.cpp |
+| `core/tests/ppu_sprite_tests.cpp` | 11 test cases sprites/OAM: **11 verdes** (ver §10.9) |
+| `core/CMakeLists.txt` / `tests/CMakeLists.txt` | incluyen render.cpp, ppu_bg_tests.cpp y ppu_sprite_tests.cpp |
 | `docs_documentacion/refs/` | ares background.cpp + dac.cpp (referencia) |
 
 Comandos útiles:
@@ -798,3 +790,62 @@ Comandos útiles:
 - Suite ppu: `./build/core/tests/snes_tests --test-case="ppu:*"`.
 - Trazas: `PPU_DEBUG=1 ./build/core/tests/snes_tests --test-case="ppu: mode 5*"`
   (prints: lineStart, map, char, draw, pick, emit, raw, px, w212C).
+
+## 10.8 Cierre de los 9 fallos (2026-08-12) — TODO VERDE
+
+9 fallos en 3 test cases → **0 fallos**. La suite completa pasa
+**74/74 test cases / 269351 assertions**, y cputest-full/basic + ROM fase 3
+siguen en SUCCESS (validación §8.3).
+
+| Bug | Fichero tocado | Resolución |
+|---|---|---|
+| A — `pickSub` hires sin color math devuelve 0 | `render.cpp` | Passthrough del color del below pick cuando no hay math habilitado (modelo ares dac.cpp `pixel()`). Era el único bug real del core. |
+| B — mode 5: tile 1 = char+1 | `ppu_bg_tests.cpp` | Test escribía solo char 0; se añadió el tile-data de char 1 (`0x2100/0x2108`) y se corrigió el índice de la aserción 342. |
+| C — mode 6: stride de chars | `ppu_bg_tests.cpp` | Datos de chars movidos a stride 0x200 (layout 4bpp hires, `origin<<9`); NOTA: ver Bug E — el fallo residual final era otra cosa. |
+| D — INIDISP `paint(1,0)` repetido | `ppu_bg_tests.cpp` | El fixture solo avanza hacia delante; se reescribieron las aserciones con x siguientes tras cada write de `$2100`. |
+| E — mode 6: vlookup corrompe voffset | `ppu_bg_tests.cpp` | (No estaba en el diagnóstico original). El test escribía la tabla de offsets en la fila V (`0x1000+col`) cuando la fila H vive en `0x13E0+col` — layout de 2 filas por el vscroll −1 del fixture, idéntico al test mode 2. La entrada `0x2008` en la fila V disparaba el vlookup (bit 13 = valid BG1) → `voffset = 1 + 0x2008` → fila 1 del mapa → cell 2 leía `0x0022` (backdrop). Fix: tabla de offsets a 2 filas (H `0x13E0+c`, V `0x1000+c`) con todos los valores 0. El render es correcto (coincide con ares: hlookup fila `bg3.voffset+0`, vlookup fila `bg3.voffset+8`, lag de una celda); el test estaba mal planteado. |
+
+Nota de precisión: el emulador NO implementa la exención de la primera
+columna de ares (`if(offsetX >= (1 << tileWidth))` en offset-per-tile) ni el
+desplazamiento `<< hires` del hscroll de BG3 en `loadOffsets`; en los casos
+cubiertos por los tests el resultado coincide (la exención la da el orden de
+slots: loadOffsets corre después de la loadMap del cell 0), pero conviene
+contrastarlo contra ares al validar modos 4/6 con offsets no nulos.
+
+## 10.9 Cierre TDD sprites/OAM (2026-08-13) — TODO VERDE
+
+Completado el punto 3 del plan (`fase4_estado_plan.md` §4): los 11 test cases
+de `core/tests/ppu_sprite_tests.cpp` pasan. Cubren: span 8x8, hflip/vflip,
+nameselect, prioridades vs BG1 (mode 0), orden de solape (índice OAM menor
+gana), rotación de prioridad ($2103 bit7), 32 items/línea + range overflow,
+34 tiles/línea + time overflow, sizes 8x8..64x64 (tablas small/large),
+interlace de sprites y reset de dirección OAM en V=225.
+
+**Un único bug real del core** (el resto eran bugs de test):
+
+| Bug | Fichero | Resolución |
+|---|---|---|
+| El trabajo H=0 de la línea 0 nunca corría | `timing.cpp`/`ppu.hpp` | El contador arranca en `dot_=0` y `advanceDot()` incrementa ANTES de procesar eventos, así que el `frame-start`/`lineStart`/`probe(0)`/`fetchSlot(0)` de la línea 0 se perdían (el sprite 0 no se evaluaba en la línea 0; lo que se veía era el OAM zeroed 1..32). Fix: extraer `startLine()` y diferir el trabajo H=0 al primer `step` vía un flag `pendingStart_` (se ejecuta ya con los writes del juego visibles). No cambia la semántica de timing de fase 3 (los 269463 assertions incluyen timing/bg verdes). |
+
+**Bugs de test corregidos** (en `ppu_sprite_tests.cpp`):
+
+| Bug | Resolución |
+|---|---|
+| Fixture con OAM zeroed (128 sprites en x=0,y=0 tocaban línea 0) | El `SpriteFixture` aparca los 128 sprites en `y=255` y deja la dirección OAM en 0. |
+| `oam()` escribía el byte alto de OAM en la dirección equivocada para índices impares | `$2102` solo setea direcciones pares; para `idx>>2` impar se pisa el byte par y el auto-incremento cae en el impar. |
+| nameselect | faltaba el bit por-sprite (OAM attr bit 0); solo se ponía el global ($2101 bits 3-4). |
+| prioridad 0 vs BG1 | el mapa de BG1 (0x0000) colisionaba con los tiles de sprite (`solidTiles`); mapa movido a 0x0400 (BG1SC=1). |
+| 34 tile budget | sprites eran 8x8 (faltaba `size=true`) y faltaba `paint(1,16)` antes de `px(16,1)`. |
+| sizes no-cuadrados (bs 6/7) | `solidTiles(w)` no cubría la altura; ahora `solidTiles(h)`. |
+| 32 items | faltaba `paint(1,248)` antes de `px(248,1)` (el píxel aún no se había pintado). |
+
+Validación (2026-08-13):
+
+```bash
+cmake --build build --target snes_tests
+./build/core/tests/snes_tests --test-case="ppu:*"   # 51/51
+./build/core/tests/snes_tests                        # 85/85, 269463 assertions
+./build/tools/cputest/snes_cputest third_party/cputest/cputest-full.sfc   # SUCCESS
+./build/tools/cputest/snes_cputest third_party/cputest/cputest-basic.sfc  # SUCCESS
+./build/tools/fase3/snes_fase3 build/tools/fase3/fase3_timing.sfc         # SUCCESS
+```

@@ -22,6 +22,18 @@ auto Ppu::advanceDot() -> void {
   // Enter dot (H = dot_, V = scanline_) and evaluate its events. Events
   // fire when the counters BECOME the trigger values, so a read of $4212
   // during dot H=0,V=225 already sees the VBlank flag set.
+  //
+  // The counter starts at dot 0 after power/reset and the increment below
+  // skips straight to dot 1, so the H=0 work of the very first line never
+  // runs on its own. Run it once here, before the first increment, while
+  // the game's own register/OAM writes are already visible.
+  if (pendingStart_) {
+    pendingStart_ = false;
+    startLine();
+    sprites_.probe(0);
+    fetchSlot(0);
+  }
+
   if (++dot_ == kDotsPerLine) {
     dot_ = 0;
     if (++scanline_ == kLinesPerFrame) {
@@ -75,23 +87,7 @@ auto Ppu::advanceDot() -> void {
   if (dot_ == 0) {
     // H=0: frame start (V=0 only: latch interlace/overscan, layer/sprite
     // frame state), then the scanline-start of every engine.
-    if (scanline_ == 0) {
-      state_.interlace = io_.interlace;
-      state_.overscan = io_.overscan;
-      layers_[0].newFrame();
-      layers_[1].newFrame();
-      layers_[2].newFrame();
-      layers_[3].newFrame();
-      sprites_.newFrame();
-    }
-    mosaic_.lineStart();
-    layers_[0].lineStart();
-    layers_[1].lineStart();
-    layers_[2].lineStart();
-    layers_[3].lineStart();
-    sprites_.lineStart();
-    window_.lineStart();
-    composer_.lineStart();
+    startLine();
     if (scanline_ == 240) renderedFrames_++;
     if (scanline_ > 240) return;  // VBlank: no per-dot work
   }
@@ -115,6 +111,27 @@ auto Ppu::advanceDot() -> void {
 
   // H=270: sprite tile fetch.
   if (dot_ == 270) sprites_.loadTiles();
+}
+
+// H=0: frame start (V=0 only) + the per-line start of every render engine.
+auto Ppu::startLine() -> void {
+  if (scanline_ == 0) {
+    state_.interlace = io_.interlace;
+    state_.overscan = io_.overscan;
+    layers_[0].newFrame();
+    layers_[1].newFrame();
+    layers_[2].newFrame();
+    layers_[3].newFrame();
+    sprites_.newFrame();
+  }
+  mosaic_.lineStart();
+  layers_[0].lineStart();
+  layers_[1].lineStart();
+  layers_[2].lineStart();
+  layers_[3].lineStart();
+  sprites_.lineStart();
+  window_.lineStart();
+  composer_.lineStart();
 }
 
 // ---- interrupt delivery sinks (phase 3b) ----
@@ -172,6 +189,7 @@ auto Ppu::power() -> void {
   irqFlag_ = false;
   hblank_ = false;
   nmiEdgePrev_ = false;
+  pendingStart_ = true;
   resetRegisters();
   driveIrqPin();
 }
@@ -187,6 +205,7 @@ auto Ppu::reset() -> void {
   vblank_ = false;
   hblank_ = false;
   nmiEdgePrev_ = false;
+  pendingStart_ = true;
   resetRegisters();
   driveIrqPin();
 }

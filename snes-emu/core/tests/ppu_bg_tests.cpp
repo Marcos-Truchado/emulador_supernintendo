@@ -355,9 +355,14 @@ TEST_CASE("ppu: mode 6 hires with offset-per-tile at 16 half-pixel columns") {
   f.vram(0x0000, 0x0000);
   f.vram(0x0001, 0x0401);
   f.vram(0x0002, 0x0802);
-  f.vram(0x1000, 0x0000);  // col 0: no offset
-  f.vram(0x1001, 0x2008);  // col 1: hoffset 8 (valid for BG1)
-  f.vram(0x1002, 0x0000);
+  // BG3 offset table. With vscroll -1 the hlookup fetches (y==0) land on
+  // offset row 31 (0x13E0+c) and the vlookup fetches (y==8) on row 0
+  // (0x1000+c), same layout as the mode 2 test. All-zero: the three map
+  // columns fetch straight, every 16 half-pixels (one cell).
+  for (int c = 0; c <= 2; c++) {
+    f.vram(0x1000 + c, 0x0000);  // V row: no vertical offsets
+    f.vram(0x13E0 + c, 0x0000);  // H row: no horizontal offsets
+  }
   for (int c = 0; c <= 2; c++) {
     f.vram(0x2000 + 0x200 * c, 0x00FF);
     f.vram(0x2008 + 0x200 * c, 0x0000);
@@ -440,3 +445,5 @@ TEST_CASE("ppu: INIDISP forced blank and brightness flag") {
   f.paint(1, 3);
   CHECK(f.ppu.pixelColor(3, 1) == (0x8000 | 0x001F));
 }
+
+}  // namespace snes

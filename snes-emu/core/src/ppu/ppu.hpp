@@ -423,6 +423,7 @@ class Ppu : public Thread {
   uint16 scanline_ = 0;
   uint64 frame_ = 0;
   uint64 renderedFrames_ = 0;
+  bool pendingStart_ = false;  // H=0 V=0 work deferred to the first step (power)
 
   uint8 nmitimen_ = 0;
   uint16 htime_ = 0;
@@ -445,6 +446,7 @@ class Ppu : public Thread {
   // ---- phase 4 rendering ----
   auto paintDot() -> void;   // per-dot render work (called from advanceDot)
   auto fetchSlot(uint32 slot) -> void;  // per-dot fetch dispatch by BG mode
+  auto startLine() -> void;  // H=0: frame start (V=0 only) + engine line starts
   auto vdisp() const -> uint32 { return state_.vdisp; }
   // Field parity derives from SETINI.0 directly until the per-frame
   // latching lands (phase 4 frame-start work); the latch then replaces it.

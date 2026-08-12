@@ -1,16 +1,19 @@
 # Fase 4 — PPU: estado actual y plan para completar
 
-Fecha: 2026-08-11 (actualizado 2026-08-12)
+Fecha: 2026-08-11 (actualizado 2026-08-13)
 Referencias: `docs_documentacion/fullsnes.txt` (noSns v1.6, fuente primaria),
 `/Users/matru/Desktop/fase_4_emulador_inspiracion/` (ares PPU, referencia de
 orden/timing/casos borde) y `docs_documentacion/refs/` (ares background.cpp +
 dac.cpp, copiados localmente).
 
-> ⚠️ **ESTADO REAL 2026-08-12**: el pipeline de fondos ya está IMPLEMENTADO
-> (`core/src/ppu/render.cpp` existe y el render está cableado en advanceDot).
-> Suite `--test-case="ppu:*"` = **40 | 37 passed | 3 failed** (mode 5, mode 6,
-> INIDISP). Diagnóstico exacto de los 9 fallos restantes, fixes de test y
-> próximos pasos: **ver `update.md` §10** (no leer este archivo como estado).
+> ✅ **ESTADO REAL 2026-08-13**: pipeline de fondos y **sprites/OAM**
+> IMPLEMENTADOS y **suite completa VERDE**: 85/85 test cases, 269,463
+> assertions. Fondos (modos 0-6, mosaic, offset-per-tile, hires, INIDISP):
+> ver `update.md` §10.4/§10.8. Sprites/OAM (probe/draw/loadTiles, prioridades,
+> overflows range/time, sizes 8x8..64x64, reset OAM en V=225): ver
+> `update.md` §10.9 (un único bug del core: el trabajo H=0 de la línea 0
+> nunca corría; el resto eran bugs de test). cputest-full/basic + ROM fase 3
+> siguen en SUCCESS.
 
 Objetivo de la fase 4: renderizado real del PPU — fondos (modos 0-7), sprites/OAM,
 mode 7, ventanas, color math, mosaic — siguiendo TDD (tests en rojo primero).
@@ -19,9 +22,8 @@ mode 7, ventanas, color math, mosaic — siguiendo TDD (tests en rojo primero).
 
 ## 1. Partes COMPLETAS y verificadas por tests (GREEN)
 
-Estado actual de la suite: **61/61 test cases, 269,297 assertions, SUCCESS**.
-Se ejecuta con `./build/core/tests/snes_tests "ppu:*"` desde `packages`… (repo del
-emulador: `./build/core/tests/snes_tests`).
+Estado actual de la suite: **85/85 test cases, 269,463 assertions, SUCCESS**
+(`./build/core/tests/snes_tests`; filtro ppu: `--test-case="ppu:*"` = 51/51).
 
 ### Ciclo B-Bus MMIO completo — `core/src/ppu/io.cpp` (nuevo, con tests)
 Verificado por `core/tests/ppu_mmio_tests.cpp` (21 test cases) + los tests de
@@ -63,79 +65,77 @@ Además, ya implementado en `io.cpp` y usado por MMIO:
 - Layout VRAM de tiles confirmado contra fullsnes (filas por pares de planos:
   2bpp=1 palabra/fila, 4bpp=2, 8bpp=4; `(origin << 3+mode) + (voffset&7)`).
 
+### Pipeline de fondos — `core/src/ppu/render.cpp` (nuevo, VERDE)
+Verificado por `core/tests/ppu_bg_tests.cpp` (13 test cases) + MMIO + timing:
+- `Layer::*` (lineStart/prime/loadMap/loadOffsets/loadPlanes/draw/mode7Draw/
+  resetState), `fetchSlot()` (tablas de slots por modo 0-7), `paintDot()`,
+  `Composer::*`, `WindowMask::*`, `Mosaic::*`.
+- Fondos modos 0-6 (2bpp/4bpp/8bpp), mosaic h/v, offset-per-tile (modos 2/6),
+  hires (modos 5/6), INIDISP. Detalle: `update.md` §10.2/§10.8.
+
+### Sprites/OAM — `core/src/ppu/render.cpp` (nuevo, VERDE)
+Verificado por `core/tests/ppu_sprite_tests.cpp` (11 test cases):
+- `SpriteEngine::probe/draw/loadTiles` (port de ares): 32 items/línea +
+  range overflow, 34 tiles/línea + time overflow, prioridades vs BG1, orden
+  de solape (índice OAM menor gana), rotación de prioridad ($2103 bit7),
+  hflip/vflip/nameselect, sizes 8x8..64x64 (tablas small/large), interlace
+  de sprites, reset de dirección OAM en V=225.
+- Un bug del core resuelto en el camino: el trabajo H=0 de la línea 0 no se
+  ejecutaba tras power/reset (el contador arranca en `dot_=0` y `advanceDot()`
+  incrementa antes de procesar). Fix: `startLine()` + flag `pendingStart_`.
+  Detalle: `update.md` §10.9.
+
 ---
 
 ## 2. Partes implementadas pero SIN test directo (verificar en próximos ciclos)
-- Tablas de prioridad/modo de `recomputeLayers()` (comprobadas solo de forma
-  indirecta a través de tests MMIO; se verifican con los tests de fondos).
-- `objectWidth()`/`objectHeight()` (tablas de tamaño de sprite de fullsnes).
-- `Mosaic::active()`.
+- Tablas de prioridad/modo de `recomputeLayers()` — verificadas indirectamente
+  por los tests de fondos (prioridad cruzada) y sprites (prioridad vs BG1).
+- `objectWidth()`/`objectHeight()` — verificadas por el test de sizes 8x8..64x64.
+- `Mosaic::active()` (io.cpp) — usada por mosaic h/v, sin test aislado.
 - Latch de interlace/overscan: `fieldBit()` lee `io_.interlace` directo;
-  el latch por frame (`state_.interlace`) lo hará el trabajo de frame-start.
+  el latch por frame (`state_.interlace`) lo hará el trabajo de frame-start
+  (pendiente, ver §3).
 
 ---
 
-## 3. Partes NO implementadas todavía (faltan por hacer)
+## 3. Lo que falta para cerrar la fase 4
 
-### Motor de render completo — `core/src/ppu/render.cpp` (nuevo, sin crear)
-- `Layer::newFrame/lineStart/prime/loadMap/loadOffsets/loadPlanes/draw/mode7Draw/resetState`
-  (fetch de mapas/planos, shifter de píxeles, passes below/above, mosaic h).
-- `Ppu::fetchSlot(slot)` — despacho de 8 slots por modo (tabla verificada contra ares main.cpp).
-- `Ppu::paintDot()` — cadencia por dot.
-- `Composer::lineStart/emitPixel/pickSub/pickMain/mixColors/lookupColor/lookupDirectColor/coldataColor/resetState`.
-- `WindowMask::lineStart/stepPixel/maskHit/resetState`.
-- `Mosaic::lineStart/resetState` (contador vertical de bloques).
-- `SpriteEngine::lineStart/newFrame/probe/draw/loadTiles/resetState` (solo existe
-  el esqueleto; probe/evaluate es el grueso).
-- Cableado en `timing.cpp::advanceDot()` + llamadas a `resetState` de motores
-  en `power()/reset()`.
+Todo lo de abajo ya existe en el código (portado de ares) pero **sin test
+verde** (ver `update.md` §10.3 para el detalle):
 
-### Tests en ROJO (escritos, sin compilar aún)
-- `core/tests/ppu_bg_tests.cpp` — 12 test cases de fondos (modos 0-6):
-  tile 2bpp/4bpp/8bpp, grupos de paleta, transparencia, hmirror/vmirror,
-  hscroll fino, 16x16 (char+16), prioridad cruzada de capas, TM gating,
-  BG4 (offset de paleta 96), offset-per-tile modos 2/6 (lag de una columna,
-  vlookup), hires (half-píxeles), mosaic horizontal+vertical, INIDISP.
-  **Estado: no compila** — error de doctest "Expression Too Complex" por
-  `CHECK(... == 0x8000 | 0x7FFF)` (faltan paréntesis en el RHS; corrección
-  mecánica pendiente).
-
-### Lo que falta de la fase 4 entera
-- Modo 7 (rotación/escalado, EXTBG, M7SEL repeat, transformación matricial).
-- Ventanas ($2123-$212A, $212E-$2133) y color math (CGADSUB/COLDATA, add/sub,
-  halve, direct color para modos 3/4/7 — el direct color 3/4 ya está testeado
-  en el plan de bg).
-- Sprites/OAM: evaluación por línea (probe), fetch de tiles, draw con
-  prioridades, overflows range/time.
-- Latch de interlace/overscan en frame-start y `fieldBit()` con `state_.interlace`.
-- Verificación de trama completa (renderedFrames, vblank).
+- **Modo 7** — `Layer::mode7Draw()` completo (matriz A/B/C/D, center, flips,
+  repeat modes, EXTBG). Falta TDD: tests de transformación M7 (A/B/C/D,
+  HOFS/VOFS, center, flips, repeat modes, EXTBG).
+- **Ventanas** — `WindowMask::stepPixel/maskHit` completos (incl. window de
+  color). Falta test ($2123-$212A, $212E, $2133).
+- **Color math** — `mixColors` (add/sub/halve), `lookupDirectColor`,
+  `coldataColor`. **REVISAR** que `io.cpp` ($2130-$2132) conecta CGADSUB/
+  COLDATA a los campos del Composer; falta test de add/sub/halve, FIXED y
+  direct color en modo 7.
+- **mode 4** (8bpp + offset-per-tile): `fetchSlot` case 4 existe, sin test.
+- **pseudoHires** ($2133 bit3 → `io_.pseudoHires`): usado en `emitPixel`, sin test.
+- **Latch de interlace/overscan** en frame-start y `fieldBit()` con
+  `state_.interlace` (hoy `fieldBit()` lee `io_.interlace` directo).
+- **Verificación de trama completa** (frames renderizados, bordes, vblank).
 
 ---
 
 ## 4. Plan para terminar la fase 4 (en orden, TDD)
 
-1. **Arreglar la sintaxis de doctest** en `ppu_bg_tests.cpp` (paréntesis en las
-   comparaciones con `|`) → compilar → confirmar ROJO (los tests fallan porque
-   `fetchSlot`/`paintDot` no están cableados).
-2. **Implementar el pipeline de fondos** (GREEN):
-   - `core/src/ppu/render.cpp`: `Layer::*`, `fetchSlot()`, `paintDot()`,
-     `Composer::*`, `WindowMask::*`, `Mosaic::*`, esqueleto de `SpriteEngine`
-     (lineStart/newFrame/draw no-op seguro).
-   - Cablear `advanceDot()` según el contrato de la cabecera (H=0 frame/line,
-     probe, fetch, prime, passes, loadTiles) y `resetState()` en power/reset.
-   - Añadir `src/ppu/render.cpp` a `core/CMakeLists.txt`.
-   - Verificar: 61+ tests GREEN, `bun typecheck` (si aplica en este repo).
-3. **TDD sprites/OAM**: `core/tests/ppu_sprite_tests.cpp` → completar
-   `probe()`/`evaluate()`, `draw()`, `loadTiles()`, overflows, OAM address
-   reset en V=225 (quirk ya testeado en MMIO), sizes 8x8/16x16/32x32/64x64.
+1. ✅ **Sintaxis doctest** en `ppu_bg_tests.cpp` (paréntesis en comparaciones
+   con `|`) → compilar → ROJO.
+2. ✅ **Pipeline de fondos** (GREEN): `render.cpp` completo + cableado de
+   `advanceDot()` + `resetState()` en power/reset + CMake.
+3. ✅ **TDD sprites/OAM**: `ppu_sprite_tests.cpp` (11 test cases verdes) —
+   ver `update.md` §10.9.
 4. **TDD modo 7**: tests de transformación M7 (A/B/C/D, HOFS/VOFS, center,
    flips, repeat modes, EXTBG) → `Layer::mode7Draw()`.
 5. **TDD ventanas + color math**: tests $2123-$212A/$212E-$2133 (máscaras,
    inversión, combinación) y CGADSUB/COLDATA (add/sub/halve, FIXED, direct
    color en modo 7) → `WindowMask` completo + `Composer` blend.
-6. **Cierre de fase**: latch interlace/overscan en frame-start, `fieldBit()`
-   con `state_.interlace`, verificación de trama completa (frames renderizados,
-   bordes, vblank), suite completa en verde.
+6. **Cierre de fase**: mode 4, pseudoHires, latch interlace/overscan en
+   frame-start, `fieldBit()` con `state_.interlace`, verificación de trama
+   completa (frames renderizados, bordes, vblank), suite completa en verde.
 7. (Opcional, si el rendimiento lo pide) batching de la cadencia por dot.
 
 Criterio de éxito: suite completa GREEN con todos los features de la fase 4
@@ -149,12 +149,13 @@ Criterio de éxito: suite completa GREEN con todos los features de la fase 4
 |---|---|
 | `core/src/ppu/ppu.hpp` | Arquitectura completa (motores, IoRegs, contrato timing) |
 | `core/src/ppu/io.cpp` | MMIO completo — VERDE (tests) |
-| `core/src/ppu/timing.cpp` | Fase 3 verde; advanceDot ya cableado al render |
-| `core/src/ppu/render.cpp` | **IMPLEMENTADO** (2026-08-12) — pipeline completo; ver update.md §10 para el estado rojo/verde |
+| `core/src/ppu/timing.cpp` | Fase 3 verde; advanceDot cableado al render + fix H=0 línea 0 (`startLine`/`pendingStart_`) |
+| `core/src/ppu/render.cpp` | IMPLEMENTADO — pipeline completo (Layer, fetchSlot, Composer, WindowMask, Mosaic, SpriteEngine) |
 | `core/tests/ppu_mmio_tests.cpp` | 21 tests VERDE |
-| `core/tests/ppu_bg_tests.cpp` | 13 tests: 10 VERDE, 3 ROJO (hires 5/6 + INIDISP; ver update.md §10.4) |
-| `core/tests/CMakeLists.txt` | Ya incluye `ppu_bg_tests.cpp` |
-| `core/CMakeLists.txt` | Ya incluye `src/ppu/render.cpp` |
+| `core/tests/ppu_bg_tests.cpp` | 13 test cases fondos: **13 verdes** |
+| `core/tests/ppu_sprite_tests.cpp` | 11 test cases sprites/OAM: **11 verdes** |
+| `core/tests/CMakeLists.txt` | Incluye `ppu_bg_tests.cpp` y `ppu_sprite_tests.cpp` |
+| `core/CMakeLists.txt` | Incluye `src/ppu/render.cpp` |
 
 Comandos:
 - Build: `cmake --build build --target snes_tests` (desde `core/..` del repo)

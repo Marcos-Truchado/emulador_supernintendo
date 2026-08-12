@@ -371,6 +371,10 @@ auto Ppu::SpriteEngine::probe(uint32 index) -> void {
   uint8 sprite = (latchedFirst + index) & 0x7F;
   if (!touchesLine(ppu.oamObj_[sprite])) return;
   ppu.latch_.oamAddr = sprite;
+  if (ppuDebug())
+    printf("probe L=%u dot=%u idx=%u sprite=%u x=%u y=%u hf=%u vf=%u prio=%u pal=%u\n",
+           ppu.scanline(), ppu.dot(), index, sprite, ppu.oamObj_[sprite].x, ppu.oamObj_[sprite].y,
+           ppu.oamObj_[sprite].hflip, ppu.oamObj_[sprite].vflip, ppu.oamObj_[sprite].priority, ppu.oamObj_[sprite].palette);
 
   if (t.itemCount++ < 32) {
     oamItem[t.itemCount - 1] = {true, sprite};
@@ -397,6 +401,10 @@ auto Ppu::SpriteEngine::draw() -> void {
     color += (tile.data >> (shift + 7)) & 2;
     color += (tile.data >> (shift + 14)) & 4;
     color += (tile.data >> (shift + 21)) & 8;
+
+    if (ppuDebug())
+      printf("sdraw L=%u x=%u tile.x=%u px=%u hf=%u data=%08X color=%u\n",
+             ppu.scanline(), x, tile.x, px, tile.hflip, tile.data, color);
 
     if (color) {
       if (aboveEnable) {
@@ -468,8 +476,15 @@ auto Ppu::SpriteEngine::loadTiles() -> void {
       uint16 address = (pos & 0xFFF0) + (y & 7);
 
       oamTile[n].data = ppu.vram_[(address + 0) & kVramMask] | (uint32(ppu.vram_[(address + 8) & kVramMask]) << 16);
+      if (ppuDebug())
+        printf("tile i=%u n=%u sp=%u valid=%u x=%u sx=%u addr=%04X hf=%u prio=%u data=%08X\n",
+               i, n, oamItem[i].index, oamTile[n].valid, x, sx, address, oamTile[n].hflip, oamTile[n].priority, oamTile[n].data);
     }
   }
+
+  if (ppuDebug())
+    printf("items L=%u count=%u tiles=%u range=%u time=%u\n",
+           ppu.scanline(), t.itemCount, t.tileCount, t.itemCount > 32, t.tileCount > 34);
 
   rangeOver |= t.itemCount > 32;
   timeOver |= t.tileCount > 34;
@@ -591,8 +606,8 @@ auto Ppu::Composer::emitPixel() -> void {
   if (ppu.scanline() == 0) return;
 
   bool hires = ppu.io_.pseudoHires || ppu.io_.mode == 5 || ppu.io_.mode == 6;
-  auto belowColor = pickSub();
-  auto aboveColor = pickMain(hires);
+  auto belowColor = pickSub(hires);
+  auto aboveColor = pickMain();
 
   if (!line) return;
   if (getenv("PPU_DEBUG") && ppu.scanline() <= 3 && ppu.dot() < 40)
@@ -632,9 +647,11 @@ auto Ppu::Composer::pickSub(bool hires) -> uint16 {
   if ((transparent = priority == 0)) below.color = lookupColor(0);
 
   if (!hires) return 0;
-  if (!below.colorEnable) return above.colorEnable ? below.color : uint16(0);
-
-  return mixColors(above.colorEnable ? below.color : 0, mathBlendMode ? above.color : coldataColor());
+  // Hires even half-pixels = sub screen: without color math the below pick
+  // passes through unchanged (ares dac.cpp pixel(): `if(!io.colorEnable[above.source]) return above.color`).
+  if (!below.colorEnable) return below.color;
+  if (!blendMode) return mixColors(below.color, coldataColor());
+  return mixColors(below.color, above.color);
 }
 
 auto Ppu::Composer::pickMain() -> uint16 {
