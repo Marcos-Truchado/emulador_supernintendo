@@ -323,6 +323,8 @@ TEST_CASE("ppu: mode 5 hires renders two half-pixels per dot") {
   f.vram(0x0000, 0x0000);
   f.vram(0x2000, 0xF00F);  // plane0 = 0x0F, plane1 = 0xF0 -> [1,1,1,1,2,2,2,2]
   f.vram(0x2008, 0x0000);
+  f.vram(0x2100, 0xF00F);  // char 1: en hires el 2º half-tile del cell usa char+1
+  f.vram(0x2108, 0x0000);
   f.cgram(1, 0x7FFF);
   f.cgram(2, 0x7C00);
   f.show();
@@ -339,7 +341,7 @@ TEST_CASE("ppu: mode 5 hires renders two half-pixels per dot") {
   CHECK(f.raw(1, 26 + 8) == (0x8000 | 0x7FFF));
   // pixelColor reads the left half of each pair.
   CHECK(f.ppu.pixelColor(2, 1) == (0x8000 | 0x7FFF));
-  CHECK(f.ppu.pixelColor(3, 1) == (0x8000 | 0x7C00));
+  CHECK(f.ppu.pixelColor(4, 1) == (0x8000 | 0x7C00));  // hp4 = primer píxel 2
 }
 
 TEST_CASE("ppu: mode 6 hires with offset-per-tile at 16 half-pixel columns") {
@@ -425,18 +427,16 @@ TEST_CASE("ppu: INIDISP forced blank and brightness flag") {
   CHECK(f.ppu.pixelColor(0, 1) == (0x8000 | 0x7FFF));
 
   f.ppu.writeRegister(0x00, 0x80);  // forced blank: raw black, no flag
-  f.paint(1, 0);
-  CHECK(f.ppu.pixelColor(0, 1) == 0x0000);
+  f.paint(1, 1);
+  CHECK(f.ppu.pixelColor(1, 1) == 0x0000);
 
   f.ppu.writeRegister(0x00, 0x00);  // brightness 0: no flag, color shows
-  f.paint(1, 0);
-  CHECK(f.ppu.pixelColor(0, 1) == 0x7FFF);
+  f.paint(1, 2);
+  CHECK(f.ppu.pixelColor(2, 1) == 0x7FFF);
 
   f.ppu.writeRegister(0x00, 0x0F);
   f.ppu.writeRegister(0x2C, 0x00);  // backdrop color
   f.cgram(0, 0x001F);
-  f.paint(1, 0);
-  CHECK(f.ppu.pixelColor(0, 1) == (0x8000 | 0x001F));
+  f.paint(1, 3);
+  CHECK(f.ppu.pixelColor(3, 1) == (0x8000 | 0x001F));
 }
-
-}  // namespace snes

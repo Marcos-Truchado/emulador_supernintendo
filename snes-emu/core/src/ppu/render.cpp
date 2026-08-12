@@ -591,8 +591,8 @@ auto Ppu::Composer::emitPixel() -> void {
   if (ppu.scanline() == 0) return;
 
   bool hires = ppu.io_.pseudoHires || ppu.io_.mode == 5 || ppu.io_.mode == 6;
-  auto belowColor = pickSub(hires);
-  auto aboveColor = pickMain();
+  auto belowColor = pickSub();
+  auto aboveColor = pickMain(hires);
 
   if (!line) return;
   if (getenv("PPU_DEBUG") && ppu.scanline() <= 3 && ppu.dot() < 40)
