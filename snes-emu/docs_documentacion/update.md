@@ -1,6 +1,6 @@
-# Estado del proyecto — Fase 3 + 3b: Scheduler + PPU timing-only + NMI/IRQ
+# Estado del proyecto — Fases 3/3b + 4 (PPU rendering, en curso)
 
-**Última actualización:** 2026-08-11
+**Última actualización:** 2026-08-12
 
 Este documento es el punto de recuperación de contexto para cualquier IA que
 continúe el proyecto. Léelo íntegro **antes** de tocar el código. La fuente de
@@ -525,3 +525,276 @@ no cambia).
 - (Re)genera `build/` si CMake cambia: `cmake -S . -B build`.
 - Añade `add_subdirectory` cuando crees una herramienta nueva, y no olvides el
   include de los headers de core en el CMakeLists de la tool.
+
+---
+
+# 10. Fase 4 — PPU rendering de fondos (EN CURSO)
+
+Documento de recuperación específico de la fase 4. Plan completo:
+`docs_documentacion/fase4_estado_plan.md`. Referencias hardware: `fullsnes.txt`
+(fuente primaria) y ares PPU-performance (referencia de orden/timing/casos
+borde, copiada en `docs_documentacion/refs/`):
+- `refs/ares-ppu-performance-background.cpp` — loadMap/loadOffsets/loadPlanes/
+  mode7Draw/prime de ares (usado para portar `Layer::*`).
+- `refs/ares-ppu-performance-dac.cpp` — DAC (compositor) de ares: el gate de
+  color math por source, el orden even/odd half-pixel en hires y `pixel()`.
+  **ÚSALO antes de tocar `Composer::pickSub/pickMain`.**
+
+## 10.1 Estado de la suite
+
+```bash
+cmake --build build --target snes_tests        # desde snes-emu/
+./build/core/tests/snes_tests --test-case="ppu:*"
+# 40 test cases | 37 passed | 3 failed | 34 skipped (los 34 son cpu/bus/cart/
+# scheduler/interrupt, no correr con el filtro ppu:*)
+# assertions: 269062 | 269053 passed | 9 failed
+```
+
+Los 3 test cases en ROJO (y sus 9 assertions) son:
+
+| Test | Líneas rojas | Causa raíz (diagnosticada) |
+|---|---|---|
+| `ppu: mode 5 hires…` | 332 (hp0), 339 (hp8), 342 (pixelColor(3,1)) | (1) pickSub devuelve 0 en hires sin color math (ver §10.4 bug A); (2) hp8 = tile 1 = char+1 cuyo tile-data el test no escribió (ver §10.4 bug B); (3) la aserción 342 usa el índice equivocado (ver §10.4 bug B) |
+| `ppu: mode 6 hires…` | 370 (26+0), 371 (26+16), 372 (26+32) | (1) mismo bug A en dot 14; (2)+(3) los datos de los chars 1 y 2 están en direcciones equivocadas del test (ver §10.4 bug C) |
+| `ppu: INIDISP forced blank…` | 429, 433, 439 | Bug de FIXTURE: `paint(1,0)` repetido no avanza ningún dot → el framebuffer conserva el píxel viejo (ver §10.4 bug D) |
+
+El render de fondos modos 0-3, 6 y 7 está implementado y verificado para
+modos 0-3 + mosaic; hires (5/6) y sprites/modo 7/ventanas NO tienen tests
+verdes todavía (ver §10.5).
+
+## 10.2 HECHO Y COMPROBADO (verde — NO re-depurar)
+
+- **Pipeline completo de fondos cableado en `timing.cpp::advanceDot()`**:
+  frame-start (V=0: latch `state_.interlace/overscan` + `newFrame` de cada
+  motor), `lineStart` de todos los motores en H=0, `sprites_.probe` cada 2
+  dots (H=0..254), `fetchSlot(dot&7)` cada dot (H=0..263), `prime()` en H=14,
+  `paintDot()` en H=14..269 (8 draws below/above + sprites + window +
+  compositor), `sprites_.loadTiles()` en H=270, `renderedFrames_++` en V=240.
+- **`render.cpp`**: `Layer` completo (lineStart/prime/loadMap/loadOffsets/
+  loadPlanes/draw/mode7Draw/resetState), `fetchSlot` (tablas de slots por
+  modo 0-7), `paintDot`, `Composer` (lineStart/emitPixel/pickSub/pickMain/
+  mixColors/lookupColor/lookupDirectColor/coldataColor/resetState),
+  `WindowMask` (lineStart/stepPixel/maskHit/resetState), `Mosaic`
+  (lineStart/resetState/active en io.cpp), `SpriteEngine`
+  (newFrame/lineStart/touchesLine/probe/draw/loadTiles/resetState — portado
+  de ares, sin tests todavía).
+- **Test fixture `BgFixture`** (`core/tests/ppu_bg_tests.cpp:17-56`) — pieza
+  clave, ver §10.6 invariantes.
+- **10 test cases GREEN** (verifican fondos): mode 0 (2bpp básico, paleta/
+  transparencia/hmirror/vmirror, hscroll fino, 16x16 char+16, 16x16 vscroll,
+  BG4 con offset de paleta), mode 1 (4bpp, prioridad cruzada, TM gating),
+  mode 2 (offset-per-tile con lag de 1 columna + vlookup), mode 3 (8bpp +
+  direct color), mosaic horizontal+vertical. Esto valida de verdad:
+  - El fetch de mapas y planos por slot (tablas de `fetchSlot`).
+  - El shift de píxeles de `draw()` y el avance de tile cada 8 draw calls.
+  - `prime()` con el desplazamiento fino de hscroll.
+  - **Shift de paleta por modo** (`render.cpp:123-127`): mode 0 → `<<2` con
+    offset `id<<5`; mode 3 (8bpp) → `<<8`; resto (4bpp) → `<<4`.
+  - Offset-per-tile modos 2 (hlookup con lag de columna, vlookup de fila) y
+    la tabla de offsets de BG3.
+  - Mosaic horizontal y vertical (incl. `$2106` bits por capa y `Mosaic::`).
+  - El gating TM/TS (`io.cpp` $212C/$212D → `aboveEnable/belowEnable`).
+
+## 10.3 HECHO pero SIN COMPROBAR (implementado, sin test verde)
+
+Estos existen en el código (portados de ares) pero **no tienen ningún test**:
+- **Sprites**: `probe()/draw()/loadTiles()` completos (render.cpp:331-476),
+  range/time overflow flags, nameselect, flips, interlace de sprites.
+  Falta `ppu_sprite_tests.cpp` (TDD: items por línea, prioridades, overflows,
+  sizes 8x8..64x64).
+- **Modo 7**: `Layer::mode7Draw()` completo (render.cpp:233-302) — matriz
+  A/B/C/D, center, flips, repeat modes, EXTBG. **Sin test** (los checks
+  `0x0000/0x7FFF/0x001F` del test INIDISP NO son modo 7; el plan original
+  decía test mode 7 en rojo pero nunca se escribió).
+- **Ventanas**: `WindowMask::stepPixel/maskHit` completos, incl. window
+  de color (máscaras de math en `composer.above/below.colorEnable`).
+  Falta test ($2123-$212A, $212E, $2133).
+- **Color math**: `mixColors` (add/sub/halve, portado de ares dac.cpp),
+  `lookupDirectColor`, `coldataColor`; los flags del Composer
+  (`bg1ColorEnable`…) se escriben… — **REVISAR**: verificar que
+  `io.cpp` ($2130-$2132) conecta CGADSUB/COLDATA a los campos del Composer
+  (blendMode/colorMode/colorHalve/*ColorEnable/colorRed-Green-Blue). Solo
+  existe la lectura/escritura de campos MMIO (comprobada en fase 4 §1 del
+  plan); el efecto visual no está probado.
+- **pseudoHires** (`$2133` bit3 → `io_.pseudoHires`): usado en `emitPixel`,
+  sin test.
+- **Interlace/overscan**: `state_.interlace/overscan` latch en frame-start
+  (timing.cpp:79-80) y `fieldBit()` — sin test directo.
+- **mode 4** (8bpp + offset-per-tile): `fetchSlot` case 4 existe; sin test.
+- **Búsqueda de tiles del 0x2100 para el puerto OAM…**: no, esto no aplica.
+
+## 10.4 Diagnóstico de los 9 fallos restantes (NO re-depurar desde cero)
+
+### Bug A — `Composer::pickSub` en hires sin color math devuelve 0
+Síntoma: en mode 5/6 los half-píxeles pares (sub screen) del **primer dot de
+la línea** (dot 14) salen como backdrop (`below=0000` en la traza emit);
+los dots siguientes sí funcionan (`below=7FFF/7C00`).
+
+Causa: `render.cpp:635`
+```cpp
+if (!below.colorEnable) return above.colorEnable ? below.color : uint16(0);
+```
+- `emitPixel` llama `pickSub` ANTES que `pickMain` (render.cpp:594-595).
+- `composer.above.colorEnable` se resetea a false en `lineStart`
+  (render.cpp:581) y solo lo pone `pickMain` (render.cpp:679) o
+  `window_.stepPixel` (render.cpp:538-539). En el dot 14 de la línea el
+  orden deja `above.colorEnable` en el estado que el dot anterior dejó.
+  Y en cualquier caso, **sin CGADSUB el comportamiento correcto NO es 0**:
+  el `pixel()` de ares (refs/ares-ppu-performance-dac.cpp:48-54) hace
+  passthrough del color del pick cuando el source no tiene color math
+  habilitado:
+  ```
+  if(!io.colorEnable[above.source]) return above.color;
+  ```
+  (En hires el even half es `pixel(x, below[x], above[x])`, dac.cpp:41.)
+
+Fix recomendado (según ares): cuando `!hires` devolver 0 (igual que ahora);
+cuando hires y el source ganador del below pick NO tiene math habilitado →
+devolver `below.color` tal cual; cuando SÍ tiene math → blend:
+```cpp
+// modelo ares dac.cpp pixel(): passthrough salvo color math habilitado
+if (!below.colorEnable) return below.color;               // passthrough
+if (!blendMode) return mixColors(below.color, coldataColor(), mathColorHalve);
+return mixColors(below.color, above.color, mathColorHalve);
+```
+- Nota: `below.colorEnable` aquí debería ser el enable CGADSUB del **source
+  que ganó el below pick** (capa 0-3/obj/COL), no el derivado del main pick
+  de `pickMain`. Para los tests actuales (sin $2131) basta passthrough; el
+  modelo fino de math hires se valida en la fase de ventanas+color math.
+- `pickMain` (render.cpp:682) ya hace passthrough correcto
+  (`above.colorEnable ? above.color : 0` donde above.colorEnable es la
+  window de color) — NO tocar.
+
+### Bug B — mode 5: tile 1 en hires = char+1, no char 0 (dos problemas)
+1. En hires (modos 5/6) cada cell del mapa de 16 half-píxeles usa DOS chars:
+   el segundo half-tile usa `character+1` (render.cpp:113,
+   `if (htiles == 4 && bool(hoffset & 8) != tile.hmirror) tile.character += 1;`
+   — portado de ares background.cpp). La traza lo confirma:
+   `map … nti=1 … char=1` y `char L=1 dot=6 charIdx=1 addr=2100 word=0000`.
+   El test (ppu_bg_tests.cpp:316-343) solo escribió char 0 (0x2000/0x2008) y
+   espera `26+8 == 0x8000|0x7FFF` (hp8) — hp8 es el primer half-pixel del
+   tile char+1 = 0x2100 = 0 → backdrop → FALLA. **El render es correcto; el
+   test está mal.** Fix del test: escribir también
+   `f.vram(0x2100, 0xF00F); f.vram(0x2108, 0x0000);` (o cambiar la
+   expectativa a backdrop).
+2. La aserción 342 `pixelColor(3, 1) == (0x8000 | 0x7C00)` está mal
+   planteada: `pixelColor(x,y)` lee la columna `26+x` del framebuffer, que
+   en hires es el half-píxel `x` (no el left-half del píxel x). Col 29 =
+   hp3 = píxel 3 del tile 0 = color 1 = 0x7FFF, no 0x7C00. Fix del test:
+   `pixelColor(4, 1)` (hp4 = 0x7C00) o esperar 0x8000|0x7FFF en (3,1).
+
+### Bug C — mode 6: datos de chars en direcciones equivocadas del test
+En mode 6 (4bpp hires) el stride entre chars es `origin << (3+mode) =
+<< 9 = 512` bytes (address = char<<9 + fila, tileBase 0x2000 →
+characterIndex 0x10 → char c en `0x2000 + c*0x200`). El test escribe los
+tiles en `0x2000 + 16*c` (stride 16 = layout 2bpp) → char 1 en 0x2010
+(= char 16 del mapa) y char 2 en 0x2020 (= char 32) quedan VACÍOS (0) → los
+cols 1 y 2 del mapa (que usan char 1 y char 2 → 0x2200/0x2400) salen
+backdrop. Fix del test (ppu_bg_tests.cpp:359-362):
+```cpp
+for (int c = 0; c <= 2; c++) {
+  f.vram(0x2000 + 0x200 * c, 0x00FF);   // (era 0x2000 + 16 * c)
+  f.vram(0x2008 + 0x200 * c, 0x0000);
+}
+```
+(o cambiar los tiles del mapa a char 0 con hoffset distintos; lo simple es
+mover los datos). Junto con el bug A, el col 0 (26+0) y cols 1/2 quedan
+verdes.
+
+### Bug D — test INIDISP: `paint(1,0)` repetido = step(0) (fixture)
+Síntoma: las 3 aserciones posteriores a reescribir $2100 leen siempre
+`0xFFFF` (el píxel viejo). `paint(y,x)` avanza SOLO hacia delante
+(`target - current`); pintar el mismo (1,0) dos veces → delta 0 → ningún
+dot → el framebuffer conserva el valor anterior (no hay "repintado").
+
+Fix del test (ppu_bg_tests.cpp:424-439): avanzar a píxeles siguientes tras
+cada writeRegister de $2100 y verificar en esa x:
+```cpp
+f.paint(1, 0);
+CHECK(f.ppu.pixelColor(0, 1) == (0x8000 | 0x7FFF));
+f.ppu.writeRegister(0x00, 0x80);   // forced blank
+f.paint(1, 1);
+CHECK(f.ppu.pixelColor(1, 1) == 0x0000);
+f.ppu.writeRegister(0x00, 0x00);   // brightness 0 (sin blank)
+f.paint(1, 2);
+CHECK(f.ppu.pixelColor(2, 1) == 0x7FFF);
+f.ppu.writeRegister(0x00, 0x0F); f.ppu.writeRegister(0x2C, 0x00);
+f.cgram(0, 0x001F);
+f.paint(1, 3);
+CHECK(f.ppu.pixelColor(3, 1) == (0x8000 | 0x001F));
+```
+Esto comprueba que el render en blank sí escribe negro (los picks devuelven
+0 con `displayDisable`, luma 0 → `*line++ = 0`).
+
+## 10.5 Próximos pasos (en orden)
+
+1. Fix A (pickSub passthrough) + recompilar + correr `--test-case="ppu:*"`
+   → mode 5/6 bajan a 0 fallos de los 6 de hires… (quedan los de test: B y C).
+2. Fix tests B y C (datos char 1/2 + índice 342) y D (INIDISP x siguientes).
+   Objetivo: `--test-case="ppu:*"` → 40/40.
+3. Correr `./build/core/tests/snes_tests` completo (sin filtro): los 34
+   test cases no-ppu (cpu/bus/cart/scheduler/interrupt) deben seguir verdes
+   (no se ha tocado nada de ellos).
+4. Commit (estado actual: `render.cpp`, `io.cpp`, `ppu_bg_tests.cpp`,
+   `ppu_mmio_tests.cpp` sin trackear; `ppu.hpp`, `timing.cpp`,
+   `CMakeLists.txt` modificados).
+5. Fase 4 siguiente: TDD sprites → modo 7 → ventanas + color math → mode 4 /
+   interlace / pseudoHires (ver `fase4_estado_plan.md` §4).
+6. Limpieza opcional al final: quitar prints de depuración (todos tras
+   `getenv("PPU_DEBUG")`), el guard de runaway de `Ppu::step` y `ppuDebug()`.
+
+## 10.6 Invariantes verificadas (NO re-verificar)
+
+- `Ppu::step(masterCycles)` es RELATIVO y solo avanza: el fixture calcula
+  `target - current` en dots (kLine = 341*4). Nunca pintar hacia atrás
+  (negativo = desbordamiento gigante = guard de runaway de timing.cpp, que
+  aborta >500000 dots — dejar el guard).
+- El display píxel x de la línea y se pinta en el dot `14+x`; el framebuffer
+  es 564 de ancho, fila `y+8` (non-overscan) y columna `26+x` (emitPixel
+  escribe col 26 = píxel 0; en hires escribe col 26+2x y 26+2x+1).
+- `pixelColor(x,y)` y `raw(y,col)` usan esos desplazamientos; `pixelColor`
+  NO es "left half" en hires (ver bug B.2).
+- vscroll -1 por capa ($210E/$2110/$2112/$2114 = 0x03FF) en el fixture:
+  línea 1 → fila 0 del mapa. Sin esto los tests de fila 0 fallan.
+- `renderingIndex` avanza cada **8 draw calls** también en hires
+  (render.cpp:213): en hires cada dot hay 2 draw calls (below/above), cada
+  fetch de tile cubre 8 half-píxeles. (El fix `8u << isHires()` era el bug.)
+- Shift de paleta: mode 0 → `<<2` + offset `id<<5`; mode 3 → `<<8`; resto →
+  `<<4` (render.cpp:125-127) — validado por mode 2 y 3. NO usar `2 << mode`.
+- Layout de chars: `tile.address = origin << (3+mode) + (voffset&7)` con
+  `origin = (char + tileBase>>(3+mode)) & mask`; en hires stride = 512 bytes
+  (mode 5/6), en 4bpp mode 2/5 = 256, en 8bpp mode 3/4 = 512.
+- `loadPlanes` lee 2 words por slot (bit-spread de ares, render.cpp:179-182);
+  en hires el 2º half-tile del cell usa char+1 (render.cpp:113).
+- Offset-per-tile modos 2/6: valid 13+id, lag de 1 columna (los offsets se
+  leen en el slot anterior), vlookup con `(hlookup & 0x8000)` etc. —
+  verificado por el test mode 2.
+- Mosaic: `mosaic.pixel`/`hcounter` en draw (render.cpp:216-224) y el
+  contador vertical en `Mosaic::lineStart` — verificado por el test mosaic.
+- TM/TS ($212C/$212D) son correctos en io.cpp (writes verificados en MMIO);
+  los tests hires escriben TS para el sub screen.
+- ares `pixel()` de dac.cpp (refs/): con ventanas de color `windowBelow` no
+  activas y sin color math, el even half en hires = passthrough del color
+  del below pick. El orden even/odd de `emitPixel` (render.cpp:600-601)
+  coincide con dac.cpp:40-43.
+- Runaway guard `Ppu::step` (timing.cpp) aborta >500000 dots — es una red
+  de seguridad para tests, no un bug.
+
+## 10.7 Ficheros de la fase 4
+
+| Fichero | Estado |
+|---|---|
+| `core/src/ppu/render.cpp` | NUEVO — pipeline completo (Layer, fetchSlot, Composer, WindowMask, Mosaic, SpriteEngine) |
+| `core/src/ppu/io.cpp` | NUEVO — MMIO completo (fase 4 §1 del plan) + acceso VRAM/OAM/CGRAM |
+| `core/src/ppu/ppu.hpp` | Arquitectura motores + contrato timing (modificado) |
+| `core/src/ppu/timing.cpp` | advanceDot cableado al render + runaway guard (modificado) |
+| `core/tests/ppu_bg_tests.cpp` | 13 test cases fondos: 10 verdes, 3 rojos (bug A-D) |
+| `core/tests/ppu_mmio_tests.cpp` | 21 test cases MMIO verdes |
+| `core/CMakeLists.txt` / `tests/CMakeLists.txt` | incluyen render.cpp y ppu_bg_tests.cpp |
+| `docs_documentacion/refs/` | ares background.cpp + dac.cpp (referencia) |
+
+Comandos útiles:
+- Build: `cmake --build build --target snes_tests` (desde `snes-emu/`).
+- Suite ppu: `./build/core/tests/snes_tests --test-case="ppu:*"`.
+- Trazas: `PPU_DEBUG=1 ./build/core/tests/snes_tests --test-case="ppu: mode 5*"`
+  (prints: lineStart, map, char, draw, pick, emit, raw, px, w212C).

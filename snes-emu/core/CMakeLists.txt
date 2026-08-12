@@ -6,6 +6,8 @@ add_library(snes_core STATIC
   src/system/system.cpp
   src/scheduler/scheduler.cpp
   src/ppu/timing.cpp
+  src/ppu/io.cpp
+  src/ppu/render.cpp
   src/cpu/cpu65816.cpp
   src/cpu/algorithms.cpp
   src/cpu/opcodes.cpp

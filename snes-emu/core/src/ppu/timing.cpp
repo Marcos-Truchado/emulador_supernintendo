@@ -11,6 +11,10 @@ constexpr uint8 kCpuVersion = 0x02;       // $4210 bits 3-0 (5A22 version 2)
 
 auto Ppu::step(uint64 masterCycles) -> void {
   assert(masterCycles % 4 == 0);
+  if (masterCycles / 4 > 500000) {
+    fprintf(stderr, "Ppu::step runaway: %llu dots\n", (unsigned long long)(masterCycles / 4));
+    abort();
+  }
   for (uint64 i = 0; i < masterCycles / 4; i++) advanceDot();
 }
 
@@ -66,6 +70,51 @@ auto Ppu::advanceDot() -> void {
   // its own latch and after RTI (re-fires until $4211 is read or the IRQ
   // is disabled — fullsnes level semantics).
   driveIrqPin();
+
+  // ---- phase 4 render pipeline (ppu.hpp cadence) ----
+  if (dot_ == 0) {
+    // H=0: frame start (V=0 only: latch interlace/overscan, layer/sprite
+    // frame state), then the scanline-start of every engine.
+    if (scanline_ == 0) {
+      state_.interlace = io_.interlace;
+      state_.overscan = io_.overscan;
+      layers_[0].newFrame();
+      layers_[1].newFrame();
+      layers_[2].newFrame();
+      layers_[3].newFrame();
+      sprites_.newFrame();
+    }
+    mosaic_.lineStart();
+    layers_[0].lineStart();
+    layers_[1].lineStart();
+    layers_[2].lineStart();
+    layers_[3].lineStart();
+    sprites_.lineStart();
+    window_.lineStart();
+    composer_.lineStart();
+    if (scanline_ == 240) renderedFrames_++;
+    if (scanline_ > 240) return;  // VBlank: no per-dot work
+  }
+
+  // H=0..254: sprite range check every 2 dots.
+  if ((dot_ & 1) == 0 && dot_ <= 254) sprites_.probe(dot_ >> 1);
+
+  // H=0..263: one map/character fetch slot per dot.
+  if (dot_ <= 263) fetchSlot(dot_ & 7);
+
+  // H=14: prime the per-layer tile shifters.
+  if (dot_ == 14) {
+    layers_[0].prime();
+    layers_[1].prime();
+    layers_[2].prime();
+    layers_[3].prime();
+  }
+
+  // H=14..269: below/above passes, sprite draw, window step, compositor.
+  if (dot_ >= 14 && dot_ <= 269) paintDot();
+
+  // H=270: sprite tile fetch.
+  if (dot_ == 270) sprites_.loadTiles();
 }
 
 // ---- interrupt delivery sinks (phase 3b) ----
@@ -123,6 +172,7 @@ auto Ppu::power() -> void {
   irqFlag_ = false;
   hblank_ = false;
   nmiEdgePrev_ = false;
+  resetRegisters();
   driveIrqPin();
 }
 
@@ -137,6 +187,7 @@ auto Ppu::reset() -> void {
   vblank_ = false;
   hblank_ = false;
   nmiEdgePrev_ = false;
+  resetRegisters();
   driveIrqPin();
 }
 

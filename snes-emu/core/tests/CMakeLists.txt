@@ -5,6 +5,8 @@ add_executable(snes_tests
   cpu_tests.cpp
   scheduler_tests.cpp
   ppu_timing_tests.cpp
+  ppu_mmio_tests.cpp
+  ppu_bg_tests.cpp
   interrupt_tests.cpp
 )
 target_include_directories(snes_tests PRIVATE ${CMAKE_SOURCE_DIR}/third_party ${CMAKE_SOURCE_DIR}/core/src)
