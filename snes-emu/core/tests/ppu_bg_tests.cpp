@@ -359,8 +359,8 @@ TEST_CASE("ppu: mode 6 hires with offset-per-tile at 16 half-pixel columns") {
   f.vram(0x1001, 0x2008);  // col 1: hoffset 8 (valid for BG1)
   f.vram(0x1002, 0x0000);
   for (int c = 0; c <= 2; c++) {
-    f.vram(0x2000 + 16 * c, 0x00FF);
-    f.vram(0x2008 + 16 * c, 0x0000);
+    f.vram(0x2000 + 0x200 * c, 0x00FF);
+    f.vram(0x2008 + 0x200 * c, 0x0000);
   }
   f.cgram(1, 0x7FFF);
   f.cgram(17, 0x03E0);
