@@ -1,10 +1,25 @@
 #include "snes/snes.hpp"
 
 #include "ppu/ppu.hpp"
+#include "scheduler/scheduler.hpp"
 
 #include <algorithm>
 
 namespace snes {
+
+// DMA transfer unit (DMAPx bits 2-0) -> byte count and B-bus address offsets
+// from BBADx (fullsnes "Transfer Unit Selection"). Shared by GP-DMA and HDMA.
+constexpr int kDmaUnitBytes[8] = {1, 2, 2, 4, 4, 4, 2, 4};
+constexpr int kDmaUnitBbus[8][4] = {
+    {0, -1, -1, -1},  // 0: 1 byte  xx
+    {0, 1, -1, -1},   // 1: 2 bytes xx, xx+1
+    {0, 0, -1, -1},   // 2: 2 bytes xx, xx
+    {0, 0, 1, 1},     // 3: 4 bytes xx, xx, xx+1, xx+1
+    {0, 1, 2, 3},     // 4: 4 bytes xx, xx+1, xx+2, xx+3
+    {0, 1, 0, 1},     // 5: 4 bytes xx, xx+1, xx, xx+1
+    {0, 0, -1, -1},   // 6: 2 bytes xx, xx
+    {0, 0, 1, 1},     // 7: 4 bytes xx, xx, xx+1, xx+1
+};
 
 // Full SNES memory map (Phase 2). Routing depends on the cartridge map mode:
 //
@@ -173,11 +188,14 @@ uint8 Bus::mmioRead(uint24 address) {
 
   // PPU write-only shadows: reads are open bus.
   if (offs <= 0x2133) return lastData_;
-  // PPU1 multiply result (unimplemented: no PPU yet).
-  if (offs >= 0x2134 && offs <= 0x2136) return latch(0x00);
-  // SLHV latch strobe + remaining read-only PPU ports: no PPU -> 0 / open bus.
-  if (offs == 0x2137) return lastData_;
-  if (offs <= 0x213F) return latch(0x00);
+  // PPU1 multiply result (delegated to the PPU, phase 4).
+  if (offs >= 0x2134 && offs <= 0x2136) return latch(ppu_.readRegister(uint8(offs)));
+  // SLHV: latch the H/V counters and return the CPU open bus (fullsnes).
+  if (offs == 0x2137) {
+    ppu_.captureCounters();
+    return lastData_;
+  }
+  if (offs <= 0x213F) return latch(ppu_.readRegister(uint8(offs)));
   // APU communication ports ($2140-$2143 + mirrors $2144-$217F).
   if (offs >= 0x2140 && offs <= 0x217F) return latch(apuPort_[offs & 0x03]);
   // WRAM port data, auto-incrementing 17-bit address.
@@ -225,8 +243,12 @@ uint8 Bus::mmioRead(uint24 address) {
 void Bus::mmioWrite(uint24 address, uint8 data) {
   uint32 offs = address & 0xFFFF;
 
-  // PPU write-only shadows $2100-$2133 (real PPU in Phase 4).
-  if (offs <= 0x2133) return void(ppuReg_[offs - 0x2100] = data);
+  // PPU B-bus writes $2100-$2133: keep the shadow and delegate to the PPU.
+  if (offs <= 0x2133) {
+    ppuReg_[offs - 0x2100] = data;
+    ppu_.writeRegister(uint8(offs - 0x2100), data);
+    return;
+  }
   // APU ports $2140-$2143 + mirrors $2144-$217F (real APU in Phase 6).
   if (offs >= 0x2140 && offs <= 0x217F) return void(apuPort_[offs & 0x03] = data);
   // WRAM port.
@@ -284,6 +306,7 @@ void Bus::writeCpuRegister(uint8 offset, uint8 data) {
     case 0x08: ppu_.write4208(data); break;  // HTIMEH
     case 0x09: ppu_.write4209(data); break;  // VTIMEL
     case 0x0A: ppu_.write420A(data); break;  // VTIMEH
+    case 0x0B: if (data) dmaRun(); break;  // MDMAEN: start GP-DMA (blocking)
     case 0x0D: break;  // MEMSEL: stored in cpuReg_ (waitStates reads bit0)
     default: break;  // 4201 WRIO: storage only
   }
@@ -348,6 +371,146 @@ auto Bus::waitStates(uint24 address) -> uint8 {
     default:
       return 6;
   }
+}
+
+// ---- GP-DMA transfer engine (phase 5) ----
+//
+// fullsnes "SNES DMA Transfers": DMA/HDMA run at 2.68MHz (8 master cycles per
+// byte) and the CPU is paused during the transfer. The engine drives the
+// scheduler exactly like the CPU's own bus accesses: sync the PPU before each
+// unit, then step 8 master cycles per byte, with a final sync so the PPU is
+// caught up at transfer end. The transfer unit (DMAPx bits 2-0) picks the byte
+// count and the B-bus address pattern (fullsnes "Transfer Unit Selection").
+auto Bus::dmaRun() -> void {
+  for (int channel = 0; channel < 8; channel++) {
+    if (cpuReg_[0x0B] & (1 << channel)) {
+      dmaTransfer(channel);
+      cpuReg_[0x0B] &= uint8(~(1 << channel));  // bits clear on completion
+    }
+  }
+}
+
+auto Bus::dmaTransfer(int channel) -> void {
+  const uint8* r = &dmaReg_[channel * 16];
+  const bool direction = r[0x0] & 0x80;  // 0 = A->B, 1 = B->A
+  const int step = (r[0x0] >> 3) & 3;    // 0=inc, 1=fixed, 2=dec, 3=fixed
+  const int unit = r[0x0] & 7;
+  const int bytes = kDmaUnitBytes[unit];
+  const uint8 bbus = r[0x1];
+  const uint8 abank = r[0x4];
+  uint16 aoffs = uint16((uint16(r[0x3]) << 8) | r[0x2]);
+  uint32 len = (uint32(r[0x6]) << 8) | r[0x5];
+  if (len == 0) len = 0x10000;  // 0 encodes 65536 bytes (fullsnes)
+
+  while (len > 0) {
+    const int n = bytes < int(len) ? bytes : int(len);
+    scheduler_.sync();
+    for (int i = 0; i < n; i++) {
+      // A-bus address within the unit: increment/decrement step per byte,
+      // fixed mode reads the same address every byte (memfill).
+      const uint16 addr = step == 0 ? uint16(aoffs + i)
+                        : step == 2 ? uint16(aoffs - i)
+                                    : aoffs;
+      const uint24 abus = (uint24(abank) << 16) | addr;
+      const uint8 bbusAddr = uint8(bbus + kDmaUnitBbus[unit][i]);
+      if (!direction) {
+        mmioWrite(0x2100 + bbusAddr, read(abus));
+      } else {
+        write(abus, mmioRead(0x2100 + bbusAddr));
+      }
+    }
+    scheduler_.step(uint64(8) * n);
+    if (step == 0) aoffs += n;
+    else if (step == 2) aoffs -= n;
+    len -= n;
+  }
+  scheduler_.sync();
+}
+
+// ---- HDMA (H-Blank DMA, phase 5) ----
+//
+// fullsnes "SNES DMA and HDMA": each active HDMA channel transfers at most one
+// unit per scanline during HBlank. At V=0 the table address reloads from A1Tx
+// (hdmaReset); each HBlank fetches the next table entry when the line counter
+// reaches zero (hdmaRun). Table entry: 1 byte line-count/repeat flag, then in
+// indirect mode a 2-byte data pointer. 00h terminates; 01h-80h transfers one
+// unit once then pauses; 81h-FFh repeats one unit per line.
+auto Bus::hdmaReset() -> void {
+  for (int channel = 0; channel < 8; channel++) {
+    if (!(cpuReg_[0x0C] & (1 << channel))) continue;
+    const uint8* r = &dmaReg_[channel * 16];
+    hdma_[channel].tableAddr = uint16((uint16(r[0x3]) << 8) | r[0x2]);
+    hdma_[channel].dataAddr = 0;
+    hdma_[channel].remaining = 0;
+    hdma_[channel].repeat = false;
+    hdma_[channel].firstLine = false;
+    // Reflect the reload in A2Ax/NTRLx (games may read them to track HDMA).
+    dmaReg_[channel * 16 + 0x8] = r[0x2];  // A2AxL = A1TxL
+    dmaReg_[channel * 16 + 0x9] = r[0x3];  // A2AxH = A1TxH
+    dmaReg_[channel * 16 + 0xA] = 0x00;    // NTRLx: no entry loaded yet
+  }
+}
+
+auto Bus::hdmaRun() -> void {
+  uint64 cost = 0;  // master cycles consumed this HBlank (8 per byte)
+  for (int channel = 0; channel < 8; channel++) {
+    if (!(cpuReg_[0x0C] & (1 << channel))) continue;
+    const uint8* r = &dmaReg_[channel * 16];
+    auto& h = hdma_[channel];
+    const bool indirect = r[0x0] & 0x40;
+    const uint8 tableBank = r[0x4];
+
+    if (h.remaining == 0) {
+      const uint8 count = read((uint24(tableBank) << 16) | h.tableAddr);
+      h.tableAddr++;
+      if (count == 0) {  // terminate this channel until next frame
+        cpuReg_[0x0C] &= uint8(~(1 << channel));
+        continue;
+      }
+      if (count >= 0x81) {  // repeat mode: transfer every line
+        h.repeat = true;
+        h.remaining = count - 0x80;
+      } else {  // single transfer (01h-80h)
+        h.repeat = false;
+        h.remaining = count;
+      }
+      h.firstLine = true;
+      if (indirect) {
+        const uint16 lo = read((uint24(tableBank) << 16) | h.tableAddr);
+        const uint16 hi = read((uint24(tableBank) << 16) | uint16(h.tableAddr + 1));
+        h.tableAddr += 2;
+        h.dataAddr = uint16((hi << 8) | lo);
+      }
+    }
+
+    const bool doTransfer = h.repeat ? true : h.firstLine;
+    if (doTransfer) {
+      const int unit = r[0x0] & 7;
+      const int bytes = kDmaUnitBytes[unit];
+      const bool direction = r[0x0] & 0x80;
+      const uint8 bbus = r[0x1];
+      const uint8 srcBank = indirect ? r[0x7] : r[0x4];  // DASBx vs A1Bx
+      uint16& src = indirect ? h.dataAddr : h.tableAddr;
+      for (int i = 0; i < bytes; i++) {
+        const uint24 abus = (uint24(srcBank) << 16) | uint16(src + i);
+        const uint8 bbusAddr = uint8(bbus + kDmaUnitBbus[unit][i]);
+        if (!direction) {
+          mmioWrite(0x2100 + bbusAddr, read(abus));
+        } else {
+          write(abus, mmioRead(0x2100 + bbusAddr));
+        }
+      }
+      src += bytes;
+      cost += uint64(8) * bytes;
+      h.firstLine = false;
+    }
+    h.remaining--;
+    // Reflect the running state in A2Ax/NTRLx (bit 7 = repeat flag).
+    dmaReg_[channel * 16 + 0x8] = uint8(h.tableAddr & 0xFF);
+    dmaReg_[channel * 16 + 0x9] = uint8(h.tableAddr >> 8);
+    dmaReg_[channel * 16 + 0xA] = uint8((h.repeat ? 0x80 : 0) | (h.remaining & 0x7F));
+  }
+  scheduler_.step(cost);
 }
 
 // ---- power / reset ----

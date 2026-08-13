@@ -82,6 +82,10 @@ class Ppu : public Thread {
   auto setNmiPin(std::function<void(bool)> sink) -> void { nmiPin_ = std::move(sink); }
   auto setIrqPin(std::function<void(bool)> sink) -> void { irqPin_ = std::move(sink); }
 
+  // ---- frame/HBlank sinks (phase 5; wired by System to the DMA/HDMA) ----
+  auto setFrameStartSink(std::function<void()> sink) -> void { frameStartSink_ = std::move(sink); }
+  auto setHblankSink(std::function<void()> sink) -> void { hblankSink_ = std::move(sink); }
+
   // ---- counters / flags (tests, runner, later phases) ----
   auto dot() const -> uint16 { return dot_; }            // H counter 0..340
   auto scanline() const -> uint16 { return scanline_; }  // V counter 0..261
@@ -436,6 +440,8 @@ class Ppu : public Thread {
 
   std::function<void(bool)> nmiPin_;
   std::function<void(bool)> irqPin_;
+  std::function<void()> frameStartSink_;  // V=0 (phase 5 HDMA table reload)
+  std::function<void()> hblankSink_;      // H=274 (phase 5 HDMA transfer)
 
   uint16 frameBuffer_[kFrameWidth * kFrameHeight] = {};
 

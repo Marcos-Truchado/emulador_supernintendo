@@ -2,6 +2,7 @@
 
 #include "snes/snes.hpp"
 #include "ppu/ppu.hpp"
+#include "scheduler/scheduler.hpp"
 
 TEST_CASE("cartridge: LoROM map mode detection from header byte") {
   // 256KB "LoROM" test image, header byte $20 (LoROM family), no copier header.
@@ -57,7 +58,8 @@ TEST_CASE("bus: WRAM + MMIO + ROM reads") {
   REQUIRE(cart.load(std::move(rom), &error));
 
   snes::Ppu ppu;
-  snes::Bus bus(cart, ppu);
+  snes::Scheduler scheduler(ppu);
+  snes::Bus bus(cart, ppu, scheduler);
 
   // WRAM write/read
   bus.write(0x7E0000, 0x42);

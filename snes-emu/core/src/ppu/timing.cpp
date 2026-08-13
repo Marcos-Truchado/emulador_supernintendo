@@ -52,6 +52,9 @@ auto Ppu::advanceDot() -> void {
   // cleared at H=1 of the following scanline (so set during H=274..340,0).
   if (dot_ == 274) hblank_ = true;
   if (dot_ == 1) hblank_ = false;
+  // Phase 5: the HBlank event drives HDMA transfers on visible lines only
+  // (HDMA is idle during VBlank and reloads its table at V=0).
+  if (dot_ == 274 && scanline_ < state_.vdisp && hblankSink_) hblankSink_();
 
   // H/V-timer IRQ flag, register-note semantics (fase3 doc §7.4 — the
   // H==HTIME / V==VTIME comparison, not the +3.5/+2.5 event-table offsets):
@@ -123,6 +126,7 @@ auto Ppu::startLine() -> void {
     layers_[2].newFrame();
     layers_[3].newFrame();
     sprites_.newFrame();
+    if (frameStartSink_) frameStartSink_();  // phase 5: HDMA table reload
   }
   mosaic_.lineStart();
   layers_[0].lineStart();

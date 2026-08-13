@@ -16,9 +16,10 @@ El proyecto es un emulador de SNES en C++20 estilo higan/bsnes
 Completadas: **Fase 0 (esqueleto/build)** + **Fase 1 (CPU 65816 aislada)** +
 **Fase 2 (bus mínimo + memoria + WRAM)** + **Fase 3 (scheduler + PPU
 timing-only)** + **Fase 3b (entrega real de NMI/IRQ al CPU)** + **Fase 4
-(rendering PPU completo: fondos, sprites, ventanas, color math, modo 7)**.
-Próximas: **Fase 5 (DMA/HDMA)**, **Fase 6 (APU: SMP+DSP)**, **Fase 7
-(integración con juegos comerciales)** — ver §11.
+(rendering PPU completo: fondos, sprites, ventanas, color math, modo 7)** +
+**Fase 5 (DMA/HDMA)**.
+Próximas: **Fase 6 (APU: SMP+DSP)**, **Fase 7 (integración con juegos
+comerciales)** — ver §12.
 
 Estado actual:
 
@@ -890,16 +891,68 @@ visual de extremo a extremo**: un ROM homebrew sencillo que renderice sprites,
 fondos, modo 7 y color math a la vez y se compare contra un emulador de
 referencia (ares) o fullsnes. Queda pendiente para más adelante.
 
-## 11. Próximas fases (5-6-7)
+## 11. Fase 5 — DMA y HDMA (COMPLETADA)
 
-Fase 4 cerrada. Lo que sigue (roadmap `emulador_snes_diseno.md` §9):
+Diseño: `docs_documentacion/fase5_dma_diseno.md`. Referencias: fullsnes ("SNES
+DMA Transfers", "SNES Timing"), ares (`cpu/dma.cpp`/`cpu/hdma.cpp`).
 
-- **Fase 5 — DMA y HDMA**: DMA general primero (más simple), luego HDMA
-  (depende de que el timing por scanline de fase 3/4 ya sea exacto). Criterio
-  de salida: efectos de raster típicos (gradiente por HDMA) se ven correctos.
+### 11.1 Implementado
+
+- **Motor GP-DMA** (`bus.cpp`): `dmaRun()`/`dmaTransfer()` disparado al escribir
+  `$420B` (bloqueante, bits auto-limpiados). Canal 0→7, unidad de transferencia
+  0-7 (1/2/4 bytes con patrón de dirección B-bus de fullsnes), step A-bus
+  (incremento/fijo/decremento), dirección A→B y B→A, `DAS=0` = 65536 bytes.
+  Timing: 8 master cycles por byte (2.68MHz), `sync()` antes de cada unidad y
+  `step(8×bytes)` después, `sync()` final.
+- **Motor HDMA** (`bus.cpp`): `hdmaReset()` (recarga de tabla en V=0 desde
+  A1Tx) + `hdmaRun()` (una unidad por scanline en HBlank). Tabla directa e
+  indirecta (puntero de 2 bytes), `00h`=termina, `01h-80h`=single (una unidad +
+  pausa), `81h-FFh`=repeat (una unidad por línea). Refleja el progreso en
+  `$43x8-$43xA` (A2Ax/NTRLx).
+- **Cableado bus ↔ PPU B-bus**: `$2100-$2133` escribe → `ppu.writeRegister`;
+  `$2134-$2136`/`$2138-$213F` lee → `ppu.readRegister`; `$2137` SLHV →
+  `captureCounters` + open bus.
+- **Sinks de la PPU**: `setFrameStartSink` (V=0) y `setHblankSink` (H=274,
+  solo líneas visibles) → cableados por `System` a `bus_->hdmaReset()/
+  hdmaRun()`.
+- **Tests** (`core/tests/dma_tests.cpp`, 8 test cases): registros de canal,
+  ciclo exacto (N bytes → 2N dots), patrón de unidad + step, DMA→VRAM,
+  HDMA directo (gradiente), HDMA single, HDMA indirecto, GP-DMA B→A (OAM).
+
+### 11.2 Bugs corregidos durante la fase
+
+| Bug | Fichero | Resolución |
+|---|---|---|
+| Step A-bus "fixed" incrementaba dentro de la unidad | `bus.cpp` | El modo fijo lee la misma dirección A-bus por byte (memfill); ahora `step==1/3` usa `aoffs` sin `+i`. |
+| Delegación de lectura B-bus pasaba `offs-0x2134` en vez de `offs` | `bus.cpp` | `ppu.readRegister(uint8(offs))` (el offset real 0x34-0x3F); antes leía el registro equivocado (B→A roto). |
+
+### 11.3 Refinamientos documentados (no bloquean, sin referencia exacta)
+
+- **Dot exacto del disparo HDMA**: se usa H=274 (inicio de HBlank); ares dispara
+  en un dot concreto de HBlank. Ajustable si un test de hardware lo exige.
+- **Alineación del primer byte de DMA** (6-8 master según alineación al dot) y
+  **refresh** (40 master/scanline) — no modelados; el costo es 8 master/byte
+  plano.
+- **Retardo de arranque del GP-DMA**: fullsnes dice "después de unos clk"; el
+  disparo es inmediato (dentro del write de `$420B`).
+- **`0x80` en HDMA** (single con 128 líneas): el NTRLx de 7 bits no puede
+  representar 128; se trata como single con 128 líneas, con el contador
+  truncado a 0 en el readback.
+
+### 11.4 Validación
+
+```bash
+cmake --build build --target snes_tests
+./build/core/tests/snes_tests                  # 108/108, 269566 assertions
+./build/tools/cputest/snes_cputest third_party/cputest/cputest-full.sfc   # SUCCESS
+./build/tools/fase3/snes_fase3 build/tools/fase3/fase3_timing.sfc         # SUCCESS
+```
+
+## 12. Próximas fases (6-7)
+
 - **Fase 6 — APU: SMP + DSP**: el SPC700 (SMP) + DSP, puertos `$2140-$217F`,
   formato BRR. Comunicación CPU↔APU por los 4 puertos de I/O (no hay bus
-  compartido).
+  compartido). El scheduler ya reserva el hueco (ratio 21:24 en `thread.hpp`).
 - **Fase 7 — Integración con juegos comerciales reales**: validación contra
   juegos comerciales y chips especiales (SA-1, SuperFX, DSP-1) — estos se dejan
   fuera a propósito hasta esta fase.

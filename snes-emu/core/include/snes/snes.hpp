@@ -87,7 +87,8 @@ class Cartridge {
 // in lastData_).
 class Bus : public Memory {
  public:
-  explicit Bus(Cartridge& cartridge, Ppu& ppu) : cartridge_(cartridge), ppu_(ppu) {}
+  explicit Bus(Cartridge& cartridge, Ppu& ppu, Scheduler& scheduler)
+      : cartridge_(cartridge), ppu_(ppu), scheduler_(scheduler) {}
 
   auto read(uint24 address) -> uint8 override;
   auto write(uint24 address, uint8 data) -> void override;
@@ -114,10 +115,16 @@ class Bus : public Memory {
   auto dmaRegister(uint8 offset) const -> uint8;  // $4300-$437B
   auto wramAddress() const -> uint32;             // $2181-$2183 17-bit addr
 
+  // Phase 5 DMA/HDMA entry points (wired by System via the PPU sinks).
+  auto hdmaReset() -> void;  // HDMA table reload (V=0)
+  auto hdmaRun() -> void;    // HDMA one-unit transfer per line (HBlank)
+
  private:
   uint8 mmioRead(uint24 address);
   void mmioWrite(uint24 address, uint8 data);
   void writeCpuRegister(uint8 offset, uint8 data);
+  void dmaRun();                 // GP-DMA for the channels set in $420B
+  void dmaTransfer(int channel);  // one channel's GP-DMA transfer
   uint8 romRead(uint24 address);
   uint8 sramRead(uint32 offs, uint32 baseOffs);
   void sramWrite(uint32 offs, uint32 baseOffs, uint8 data);
@@ -125,6 +132,7 @@ class Bus : public Memory {
 
   Cartridge& cartridge_;
   Ppu& ppu_;
+  Scheduler& scheduler_;
   std::vector<uint8> wram_ = std::vector<uint8>(128 * 1024);
   std::vector<uint8> sram_;
   uint8 lastData_ = 0;
@@ -134,6 +142,15 @@ class Bus : public Memory {
   uint8 cpuReg_[0x10] = {};  // $4200-$420D write shadows
   uint8 dmaReg_[0x80] = {};  // $4300-$437B (8 channels x 16 bytes)
   uint32 wramAddr_ = 0;      // $2181-$2183 17-bit WRAM port address
+
+  struct HdmaState {  // per-channel HDMA runtime state (phase 5)
+    uint16 tableAddr = 0;  // A2Ax: current table address
+    uint16 dataAddr = 0;   // DASx: current indirect data address
+    uint8 remaining = 0;   // lines left in the current table entry
+    bool repeat = false;   // repeat mode (transfer every line)
+    bool firstLine = false;
+  } hdma_[8];
+
   uint8 mpyA_ = 0xFF;        // $4202 multiplicand
   uint16 divDividend_ = 0;   // $4204/$4205 dividend
   uint16 divQuotient_ = 0;   // $4214/$4215 division quotient
