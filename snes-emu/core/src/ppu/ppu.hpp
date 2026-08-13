@@ -3,6 +3,7 @@
 #include <functional>
 
 #include "scheduler/thread.hpp"
+#include "serialize/serialize.hpp"
 #include "snes/snes.hpp"
 
 namespace snes {
@@ -122,6 +123,16 @@ class Ppu : public Thread {
   // $2128-$212A) return the value most recently read from $2134-$2136,
   // $2138-$213A, $213E instead of the CPU open bus.
   auto ppu1Mdr() const -> uint8 { return ppu1_.mdr; }
+
+  // ---- debug helpers (real-game rendering) ----
+  auto bgScreenAddress(int bg) const -> uint16 { return layers_[bg].screenAddress; }
+  auto bgTileBase(int bg) const -> uint16 { return layers_[bg].tileBase; }
+  auto bgHScroll(int bg) const -> uint16 { return layers_[bg].hscroll; }
+  auto bgVScroll(int bg) const -> uint16 { return layers_[bg].vscroll; }
+
+  // ---- save states (phase 7) ----
+  auto serialize(Writer& w) const -> void;
+  auto deserialize(Reader& r) -> void;
 
  private:
   static constexpr uint16 kVramMask = 0x7FFF;

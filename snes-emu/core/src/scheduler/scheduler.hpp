@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "scheduler/thread.hpp"
+#include "serialize/serialize.hpp"
 
 namespace snes {
 
@@ -45,6 +46,10 @@ class Scheduler {
   auto clock() const -> std::int64_t { return delta_; }
 
   auto reset() -> void { delta_ = 0; }
+
+  // ---- save states ----
+  auto serialize(Writer& w) const -> void { w.u64(uint64(delta_)); }
+  auto deserialize(Reader& r) -> void { delta_ = std::int64_t(r.u64()); }
 
  private:
   Thread& thread_;

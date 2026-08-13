@@ -243,4 +243,41 @@ auto Cpu65816::traceState() const -> TraceState {
   return t;
 }
 
+// ---- save states ----
+
+auto Cpu65816::serialize(Writer& w) const -> void {
+  w.u32(PC.d);
+  w.u16(A.w);
+  w.u16(X.w);
+  w.u16(Y.w);
+  w.u16(S.w);
+  w.u16(D.w);
+  w.u8(B);
+  w.u8(uint8(P));
+  w.b(E);
+  w.b(nmi);
+  w.b(irq);
+  w.b(wai);
+  w.b(stp);
+  w.u16(vector);
+}
+
+auto Cpu65816::deserialize(Reader& r) -> void {
+  PC = r.u32();
+  A = r.u16();
+  X = r.u16();
+  Y = r.u16();
+  S = r.u16();
+  D = r.u16();
+  B = r.u8();
+  P = r.u8();
+  E = r.b();
+  nmi = r.b();
+  irq = r.b();
+  wai = r.b();
+  stp = r.b();
+  vector = r.u16();
+  cycles_ = 0;
+}
+
 }  // namespace snes

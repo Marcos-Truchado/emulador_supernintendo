@@ -13,3 +13,4 @@ add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 add_subdirectory(core)
 add_subdirectory(tools)
+add_subdirectory(frontend)

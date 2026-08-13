@@ -8,6 +8,7 @@ add_library(snes_core STATIC
   src/ppu/timing.cpp
   src/ppu/io.cpp
   src/ppu/render.cpp
+  src/ppu/serialize.cpp
   src/apu/apu.cpp
   src/cpu/cpu65816.cpp
   src/cpu/algorithms.cpp

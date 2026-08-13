@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "snes/snes.hpp"
+#include "apu/apu.hpp"
 #include "ppu/ppu.hpp"
 #include "scheduler/scheduler.hpp"
 
@@ -58,8 +59,9 @@ TEST_CASE("bus: WRAM + MMIO + ROM reads") {
   REQUIRE(cart.load(std::move(rom), &error));
 
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
 
   // WRAM write/read
   bus.write(0x7E0000, 0x42);

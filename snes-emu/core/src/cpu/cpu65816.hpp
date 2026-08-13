@@ -86,6 +86,10 @@ class Cpu65816 {
   };
   auto traceState() const -> TraceState;
 
+  // ---- save states (phase 7) ----
+  auto serialize(Writer& w) const -> void;
+  auto deserialize(Reader& r) -> void;
+
  private:
   // ---- status register as discrete bits (bit layout of P) ----
   struct P8 {

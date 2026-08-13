@@ -979,6 +979,9 @@ Implementado en `core/src/apu/apu.hpp`/`apu.cpp`. Referencia: fullsnes
 |---|---|
 | `read()/write()` usaban `addr >= 0xF0` y atrapaban la ROM `$FFC0-$FFFF` | acotado a `addr >= 0xF0 && addr < 0x0100` (los puertos I/O son la página 00) |
 | SET1/CLR1/BBS/BBC usaban `op & 0x0F` y `op >> 4` | el bit está en `op >> 5` y el sub-opcode en `op & 0x1F` (b\*20h+xx) |
+| ALU memoria (`cmd aa,bb`/`cmd aa,#nn`/`cmd (X),(Y)`) usaba `A` como primer operando y leía mal el orden de bytes | el primer operando es `[mem]` (no `A`), y el byte order es `bb aa` / `nn aa` (fullsnes "8bit ALU Operations"). Bloqueaba el handshake BBAA/`$CC` del boot ROM (el `CMP $F4,#$CC` nunca salía) |
+| Faltaban `CMP X/Y` (`C8`/`3E`/`1E`/`AD`/`7E`/`5E`) | añadidas las 6 formas extra de compare (fullsnes "Compare can additionally have the following forms"). Las usaba el bucle de transfer del boot ROM (`CMP Y,dp`) |
+| `CALL`/`TCALL`/`PCALL`/`BRK` empujaban el PC a `[SP-1]/[SP-2]` en vez de `[SP]` con `SP--` | off-by-one en el stack; `RET`/`RET1` leían `[SP+1]` por lo que el retorno iba a una dirección basura (el driver de sonido de SMW saltaba a RAM zeroeada y colgaba la pantalla en negro) |
 
 ### 12.3 Refinamientos documentados (no bloquean)
 
@@ -988,15 +991,14 @@ Implementado en `core/src/apu/apu.hpp`/`apu.cpp`. Referencia: fullsnes
   pitch fuera 0x1000). La tabla de Gauss de fullsnes es el upgrade.
 - **Noise y pitch modulation (NON/PMON)** y **ADSR completo** (decay/release
   por pasos) simplificados.
-- **Timers** `$FA-$FF` almacenados pero sin contar (solo `TnOUT` leído=0).
-- **Puertos `$2140-$2143`** no cableados al bus (el bus sigue con `apuPort_`
-  de storage); el audio no sale al frontend todavía (eso es fase 7/integración).
+- **Timers** `$FA-$FF` ahora cuentan (fase 7); antes solo almacenados.
+- **Puertos `$2140-$2143`** cableados al bus (fase 7); antes storage plano.
 
 ### 12.4 Validación
 
 ```bash
 cmake --build build --target snes_tests
-./build/core/tests/snes_tests                  # 111/111, 269572 assertions
+./build/core/tests/snes_tests                  # 122/122, 269629 assertions
 ./build/tools/cputest/snes_cputest third_party/cputest/cputest-full.sfc   # SUCCESS 0081a2
 ./build/tools/fase3/snes_fase3 build/tools/fase3/fase3_timing.sfc         # SUCCESS
 ```
@@ -1012,3 +1014,62 @@ Pendientes menores documentados de fase 4 (no bloquean): PAL, líneas
 largas/cortas (341/342/340), refresh DRAM, sync de contadores en V=128, e
 interlace de campo completo (STAT78 bit 7 usa `frame_ & 1`, sin contador de
 campo separado).
+
+## 14. Fase 7 — Integración (COMPLETADA)
+
+Cierra los 6 puntos obligatorios de `pendiente_proyecto.md`:
+
+1. **Puertos `$2140-$2143` cableados** (`bus.cpp`): el `Bus` ahora recibe una
+   `Apu&` (cuarto parámetro del constructor) y enruta `$2140-$217F` a
+   `apu.readPort/writePort`. CPU→SMP escribe el input latch (`apuIn_`),
+   SMP→CPU lee el output latch (`port_[4..7]`) — direcciones separadas, como
+   el hardware real. El handshake BBAA del boot ROM se verifica de extremo a
+   extremo (test de integración: `readPort(0)==0xAA`, `readPort(1)==0xBB`).
+2. **Timers del SMP contando** (`apu.cpp`): `$FA-$FC` (divisores, 0=÷256),
+   `$FD-$FF` (TnOUT 4 bits, reset-on-read). Timer 0/1 con reloj de 128 ciclos
+   SMP (8kHz), timer 2 con reloj de 16 ciclos (64kHz). Habilitación por bits
+   0-2 de CONTROL (`$F1`); deshabilitar pone TnOUT=0 y recarga. El DSP ahora
+   genera 1 muestra por 32 ciclos SMP (antes era por instrucción).
+3. **Frontend SDL2** (`frontend/`): ventana 768×672 (256×224 a ×3), textura
+   RGB24 alimentada por `System::pixelColor` (RGB555→RGB888), input por
+   teclado (Z=B, X=A, A=Y, S=X, Q=L, W=R, Enter=Start, Shift=Select, flechas),
+   Esc=salir, F5/F7=guardar/cargar estado (`.ss` junto al ROM). Frame pacing a
+   60fps con pre-roll de audio.
+4. **Salida de audio**: ring buffer estéreo int16 de 32kHz en la `Apu`
+   (`pushSample`/`readAudio`); el frontend lo consume con `SDL_QueueAudio`.
+5. **Save states**: serializer binario mínimo (`core/src/serialize/`) +
+   `serialize/deserialize` en Scheduler, Cpu, Ppu, Apu y Bus.
+   `System::saveState/loadState` con magic "SNSS"+version; `loadState`
+   devuelve false ante datos truncados/corruptos. La PPU serializa VRAM/OAM/
+   CGRAM/registros/motores/timing (el framebuffer se regenera); el buffer de
+   audio no se guarda.
+6. **Validación**: el test de save-state exige byte-identidad de dos sistemas
+   tras snapshot+load+pasos en lockstep.
+
+### 14.1 API pública nueva (`snes.hpp`)
+
+`System::readAudio(int16*, size_t)`, `System::setJoypad(port, uint16)`,
+`System::saveState()/loadState()`, `System::frameWidth/frameHeight/
+pixelColor/renderedFrames`. `Bus::setJoypad` usa el bitfield estándar
+(B=0x8000 … R=0x0010), leído vía auto-read `$4218-$421F` (JOYxL=A/X/L/R,
+JOYxH=B/Y/Sel/Start/D-pad) y manual-read `$4016/$4017` (MSB-first, strobe en
+bit0, `$4017` bits 2-4 = GND).
+
+### 14.2 Validación
+
+```bash
+cmake --build build
+./build/core/tests/snes_tests            # 119/119, 269626 assertions
+./build/tools/cputest/snes_cputest third_party/cputest/cputest-full.sfc   # SUCCESS
+./build/tools/cputest/snes_cputest third_party/cputest/cputest-basic.sfc  # SUCCESS
+./build/tools/fase3/snes_fase3 build/tools/fase3/fase3_timing.sfc         # SUCCESS
+./build/frontend/snes_frontend <rom.sfc> # SDL2 (necesita `brew install sdl2`)
+```
+
+### 14.3 Pendiente / opcional (no bloquean)
+
+- Chips especiales (SA-1, SuperFX, DSP-1/2/3/4, CX4, S-DD1, SPC7110) — cada
+  uno módulo aparte en `cartridge/` (§0.2 del diseño).
+- Mejoras de audio: eco/reverb, interpolación gaussiana, noise (NON), PMON,
+  ADSR decay/release completo (ver `pendiente_proyecto.md`).
+- Validación visual contra juegos comerciales reales (LoROM/HiROM).

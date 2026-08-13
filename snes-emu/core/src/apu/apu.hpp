@@ -1,6 +1,10 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
+
 #include "scheduler/thread.hpp"
+#include "serialize/serialize.hpp"
 #include "snes/snes.hpp"
 
 namespace snes {
@@ -33,7 +37,7 @@ class Apu : public Thread {
 
   // CPU↔APU ports $2140-$2143 (the bus routes these here).
   auto writePort(int index, uint8 data) -> void;
-  auto readPort(int index) -> uint8;
+  auto readPort(int index) const -> uint8;
 
   // readback for tests
   auto ram(uint16 address) const -> uint8;
@@ -44,6 +48,21 @@ class Apu : public Thread {
   auto setRam(uint16 address, uint8 data) -> void { ram_[address] = data; }
   auto setDspRegister(uint8 index, uint8 data) -> void { dspWrite(index, data); }
   auto setControl(uint8 data) -> void { write(0x00F1, data); }
+  auto inputPort(int index) const -> uint8 { return apuIn_[index]; }   // CPU->SMP latch
+  auto setOutputPort(int index, uint8 data) -> void { port_[0x04 + index] = data; }
+  auto setTimerDivider(int n, uint8 data) -> void { write(uint8(0xFA + n), data); }
+  auto timerOut(int n) const -> uint8 { return timerOut_[n] & 0x0F; }
+  auto pc() const -> uint16 { return pc_; }
+
+  // ---- audio output (phase 7) ----
+  // Number of DSP samples (stereo int16, interleaved L/R) waiting in the
+  // ring buffer; the frontend pulls them with readAudio().
+  auto audioAvailable() const -> size_t { return audioCount_; }
+  auto readAudio(int16* buffer, size_t count) -> size_t;
+
+  // ---- save states (phase 7) ----
+  auto serialize(Writer& w) const -> void;
+  auto deserialize(Reader& r) -> void;
 
  private:
   // ---- SPC700 CPU ----
@@ -59,6 +78,8 @@ class Apu : public Thread {
   uint8 apuIn_[4] = {};  // CPUIO input latch (main CPU -> SMP, $F4-$F7 reads)
   // timers: dividers $FA-$FC, outputs $FD-$FF.
   int timerDivider_[3] = {};
+  uint8 timerOut_[3] = {};  // TnOUT (4-bit, reset on read)
+  int timerCounter_[3] = {};  // internal counter toward the next output step
 
   static constexpr uint8 kN = 0x80, kV = 0x40, kP = 0x20, kB = 0x10,
                            kH = 0x08, kI = 0x04, kZ = 0x02, kC = 0x01;
@@ -93,9 +114,24 @@ class Apu : public Thread {
   void decodeBrr(int n);        // decode one BRR sample for voice n
   void runEnvelope(int n);      // one envelope step (ADSR/gain)
   void mixSample();             // sum 8 voices -> sample_[2]
+  void pushSample();            // append sample_ to the audio ring buffer
+  void tickTimers(int cycles);  // advance the three SMP timers by cycles
+  void tickTimer(int n);        // one clock tick of a single timer
 
   int counter_ = 0;   // master cycles accumulated toward the next SMP step
-  int timerClock_ = 0;  // 8kHz/64kHz timer phase accumulator
+  int sampleClock_ = 0;  // SMP cycles accumulated toward the next DSP sample
+
+  // SMP timers: timer 2 uses a 16-cycle clock, timers 0/1 a 128-cycle clock.
+  int timerClock16_ = 0;
+  int timerClock128_ = 0;
+
+  // DSP sample ring buffer (stereo int16, interleaved). Fixed capacity; the
+  // frontend drains it once per frame, so it never fills in practice.
+  static constexpr size_t kAudioBuf = 32768;
+  std::array<int16, kAudioBuf> audioBuf_ = {};
+  size_t audioWr_ = 0;
+  size_t audioRd_ = 0;
+  size_t audioCount_ = 0;
 
   // 64-byte boot ROM at $FFC0-$FFFF (fullsnes "Boot ROM Disassembly").
   static const uint8 bootRom_[64];

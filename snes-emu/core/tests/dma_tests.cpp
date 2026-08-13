@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "snes/snes.hpp"
+#include "apu/apu.hpp"
 #include "ppu/ppu.hpp"
 #include "scheduler/scheduler.hpp"
 
@@ -23,8 +24,9 @@ static Cartridge makeCart() {
 TEST_CASE("dma: channel register file ($4300-$437B)") {
   Cartridge cart = makeCart();
   Ppu ppu;
+  Apu apu;
   Scheduler scheduler(ppu);
-  Bus bus(cart, ppu, scheduler);
+  Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   // DMAP0, BBAD0, A1T0, DAS0 for channel 0.
@@ -54,8 +56,9 @@ TEST_CASE("dma: GP-DMA transfers N bytes in N*8 master cycles") {
   snes::Cartridge cart = makeCart();
   snes::Ppu ppu;
   ppu.power();
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   constexpr int N = 8;
@@ -93,8 +96,9 @@ TEST_CASE("dma: GP-DMA transfers N bytes in N*8 master cycles") {
 TEST_CASE("dma: GP-DMA unit pattern and A-bus step modes") {
   snes::Cartridge cart = makeCart();
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   // Source WRAM: 8 bytes 0x11..0x88.
@@ -112,10 +116,11 @@ TEST_CASE("dma: GP-DMA unit pattern and A-bus step modes") {
     bus.write(0x00420B, 0x01);
 
     // Unit 1: apu[0..3] = 0x11,0x22,0x33,0x44; unit 2: apu[0..3] = 0x55..0x88.
-    CHECK(bus.apuPort(0) == 0x55);
-    CHECK(bus.apuPort(1) == 0x66);
-    CHECK(bus.apuPort(2) == 0x77);
-    CHECK(bus.apuPort(3) == 0x88);
+    // DMA to $2140-$2143 writes the SMP input latches.
+    CHECK(apu.inputPort(0) == 0x55);
+    CHECK(apu.inputPort(1) == 0x66);
+    CHECK(apu.inputPort(2) == 0x77);
+    CHECK(apu.inputPort(3) == 0x88);
   }
 
   SUBCASE("fixed A-bus step re-reads the same source byte") {
@@ -130,10 +135,10 @@ TEST_CASE("dma: GP-DMA unit pattern and A-bus step modes") {
     bus.write(0x00420B, 0x01);
 
     // Both units read source byte 0 (0x11) four times.
-    CHECK(bus.apuPort(0) == 0x11);
-    CHECK(bus.apuPort(1) == 0x11);
-    CHECK(bus.apuPort(2) == 0x11);
-    CHECK(bus.apuPort(3) == 0x11);
+    CHECK(apu.inputPort(0) == 0x11);
+    CHECK(apu.inputPort(1) == 0x11);
+    CHECK(apu.inputPort(2) == 0x11);
+    CHECK(apu.inputPort(3) == 0x11);
   }
 }
 
@@ -141,8 +146,9 @@ TEST_CASE("dma: GP-DMA writes VRAM through the PPU B-bus ($2118/$2119)") {
   Cartridge cart = makeCart();
   Ppu ppu;
   ppu.power();
+  Apu apu;
   Scheduler scheduler(ppu);
-  Bus bus(cart, ppu, scheduler);
+  Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   // Two source words in WRAM: 0x1234, 0x5678.
@@ -175,8 +181,9 @@ TEST_CASE("dma: HDMA direct mode writes a per-line gradient") {
   Cartridge cart = makeCart();
   Ppu ppu;
   ppu.power();
+  Apu apu;
   Scheduler scheduler(ppu);
-  Bus bus(cart, ppu, scheduler);
+  Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   // Wire the PPU frame/HBlank events to the HDMA engine.
@@ -214,8 +221,9 @@ TEST_CASE("dma: HDMA single mode transfers once then pauses") {
   Cartridge cart = makeCart();
   Ppu ppu;
   ppu.power();
+  Apu apu;
   Scheduler scheduler(ppu);
-  Bus bus(cart, ppu, scheduler);
+  Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   ppu.setFrameStartSink([&]() { bus.hdmaReset(); });
@@ -246,8 +254,9 @@ TEST_CASE("dma: HDMA indirect mode follows the table pointer") {
   Cartridge cart = makeCart();
   Ppu ppu;
   ppu.power();
+  Apu apu;
   Scheduler scheduler(ppu);
-  Bus bus(cart, ppu, scheduler);
+  Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   ppu.setFrameStartSink([&]() { bus.hdmaReset(); });
@@ -277,8 +286,9 @@ TEST_CASE("dma: GP-DMA B->A reads OAM into WRAM") {
   Cartridge cart = makeCart();
   Ppu ppu;
   ppu.power();
+  Apu apu;
   Scheduler scheduler(ppu);
-  Bus bus(cart, ppu, scheduler);
+  Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   // Put 0x42 in OAM[0].x (via $2102/$2103/$2104).

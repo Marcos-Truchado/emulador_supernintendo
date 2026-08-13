@@ -43,6 +43,8 @@ class Thread;
 class Scheduler;
 class Ppu;
 class Apu;
+class Writer;
+class Reader;
 
 enum class MapMode {
   unknown,
@@ -88,8 +90,8 @@ class Cartridge {
 // in lastData_).
 class Bus : public Memory {
  public:
-  explicit Bus(Cartridge& cartridge, Ppu& ppu, Scheduler& scheduler)
-      : cartridge_(cartridge), ppu_(ppu), scheduler_(scheduler) {}
+  explicit Bus(Cartridge& cartridge, Ppu& ppu, Scheduler& scheduler, Apu& apu)
+      : cartridge_(cartridge), ppu_(ppu), scheduler_(scheduler), apu_(apu) {}
 
   auto read(uint24 address) -> uint8 override;
   auto write(uint24 address, uint8 data) -> void override;
@@ -109,9 +111,16 @@ class Bus : public Memory {
   // last byte on the data bus (what open-bus reads return)
   auto openBus() const -> uint8 { return lastData_; }
 
+  // Joypad input injection (frontend -> core). `buttons` is the 16-bit
+  // button state (B=0x8000, Y=0x4000, Select=0x2000, Start=0x1000,
+  // Up=0x0800, Down=0x0400, Left=0x0200, Right=0x0100, A=0x0080,
+  // X=0x0040, L=0x0020, R=0x0010) exposed via auto-read $4218-$421F and
+  // the manual-read shift registers $4016/$4017.
+  auto setJoypad(int port, uint16 buttons) -> void;
+
   // register readback for tests and later phases
   auto ppuRegister(uint8 offset) const -> uint8;  // $2100-$2133 write shadows
-  auto apuPort(uint8 index) const -> uint8;       // $2140-$2143
+  auto apuPort(uint8 index) const -> uint8;       // $2140-$2143 (SMP->CPU side)
   auto cpuRegister(uint8 offset) const -> uint8;  // $4200-$420D write shadows
   auto dmaRegister(uint8 offset) const -> uint8;  // $4300-$437B
   auto wramAddress() const -> uint32;             // $2181-$2183 17-bit addr
@@ -119,6 +128,10 @@ class Bus : public Memory {
   // Phase 5 DMA/HDMA entry points (wired by System via the PPU sinks).
   auto hdmaReset() -> void;  // HDMA table reload (V=0)
   auto hdmaRun() -> void;    // HDMA one-unit transfer per line (HBlank)
+
+  // ---- save states (phase 7) ----
+  auto serialize(Writer& w) const -> void;
+  auto deserialize(Reader& r) -> void;
 
  private:
   uint8 mmioRead(uint24 address);
@@ -134,13 +147,16 @@ class Bus : public Memory {
   Cartridge& cartridge_;
   Ppu& ppu_;
   Scheduler& scheduler_;
+  Apu& apu_;
   std::vector<uint8> wram_ = std::vector<uint8>(128 * 1024);
   std::vector<uint8> sram_;
   uint8 lastData_ = 0;
 
   uint8 ppuReg_[0x34] = {};  // $2100-$2133 write shadows
-  uint8 apuPort_[4] = {};    // $2140-$2143
   uint8 cpuReg_[0x10] = {};  // $4200-$420D write shadows
+  uint16 joypad_[4] = {};       // $4218-$421F auto-read button state
+  uint16 joypadShift_[4] = {};  // $4016/$4017 manual-read shift registers
+  bool joypadStrobe_ = false;   // $4016 bit0 latch
   uint8 dmaReg_[0x80] = {};  // $4300-$437B (8 channels x 16 bytes)
   uint32 wramAddr_ = 0;      // $2181-$2183 17-bit WRAM port address
 
@@ -191,6 +207,22 @@ class System {
   auto apu() const -> const Apu&;
   auto scheduler() -> Scheduler&;
   auto scheduler() const -> const Scheduler&;
+
+  // ---- frontend integration (phase 7) ----
+  // Pull up to `count` DSP samples (stereo, interleaved int16) from the
+  // audio ring buffer; returns the number of samples actually copied.
+  auto readAudio(int16* buffer, size_t count) -> size_t;
+  // Inject controller state (see Bus::setJoypad for the button bit layout).
+  auto setJoypad(int port, uint16 buttons) -> void;
+  // Save/restore the full machine state (CPU + PPU + APU + bus + scheduler).
+  auto saveState() -> std::vector<uint8>;
+  auto loadState(const std::vector<uint8>& data) -> bool;
+
+  // ---- framebuffer (phase 7; lets the frontend read the PPU output) ----
+  auto frameWidth() const -> int;         // visible width (256)
+  auto frameHeight() const -> int;        // visible height (224 safe area)
+  auto pixelColor(int x, int y) const -> uint16;  // RGB555 (bit15 = bright)
+  auto renderedFrames() const -> uint64;  // PPU frame counter (frame pacing)
 
  private:
   std::unique_ptr<Cartridge> cartridge_;

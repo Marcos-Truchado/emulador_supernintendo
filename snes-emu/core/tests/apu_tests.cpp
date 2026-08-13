@@ -67,4 +67,107 @@ TEST_CASE("apu: DSP BRR decode produces a non-zero sample after key-on") {
   CHECK(apu.sampleLeft() != 0);
 }
 
+TEST_CASE("apu: SMP timers count (128-cycle clock) and disable clears output") {
+  Apu apu;
+  apu.power();
+  apu.setControl(0x01);           // bit7=0 (RAM at $FFC0), bit0=1 (timer 0 on)
+  apu.setRam(0xFFC0, 0x2F);       // BRA -2 (4-cycle self loop)
+  apu.setRam(0xFFC1, 0xFE);
+  apu.reset();                    // PC = 0xFFC0
+  apu.setTimerDivider(0, 1);      // divide by 1: T0OUT++ on every 128-cycle tick
+
+  CHECK(apu.timerOut(0) == 0);
+  // 32 BRA iterations * 4 cycles = 128 cycles = one timer-0 tick.
+  for (int i = 0; i < 32; i++) apu.step(21);
+  CHECK(apu.timerOut(0) == 1);
+  for (int i = 0; i < 32; i++) apu.step(21);
+  CHECK(apu.timerOut(0) == 2);
+
+  // Disabling the timer (CONTROL bit 0 = 0) resets the output to zero.
+  apu.setControl(0x00);
+  CHECK(apu.timerOut(0) == 0);
+}
+
+TEST_CASE("apu: SMP timer 2 runs on the 16-cycle (64kHz) clock") {
+  Apu apu;
+  apu.power();
+  apu.setControl(0x04);           // timer 2 enabled (bit2), RAM mode
+  apu.setRam(0xFFC0, 0x2F);       // BRA -2 (4-cycle self loop)
+  apu.setRam(0xFFC1, 0xFE);
+  apu.reset();
+  apu.setTimerDivider(2, 1);      // divide by 1: T2OUT++ every 16-cycle tick
+
+  CHECK(apu.timerOut(2) == 0);
+  // 4 BRA iterations * 4 cycles = 16 cycles = one timer-2 tick.
+  for (int i = 0; i < 4; i++) apu.step(21);
+  CHECK(apu.timerOut(2) == 1);
+  for (int i = 0; i < 4; i++) apu.step(21);
+  CHECK(apu.timerOut(2) == 2);
+}
+
+TEST_CASE("apu: audio ring buffer accumulates and drains") {
+  Apu apu;
+  apu.power();
+  CHECK(apu.audioAvailable() == 0);
+
+  // Run the boot ROM and then idle: the DSP emits 32kHz samples regardless.
+  for (int i = 0; i < 1024; i++) apu.step(21);
+  const size_t available = apu.audioAvailable();
+  CHECK(available > 0);
+  CHECK(available % 2 == 0);  // stereo (interleaved L/R int16)
+
+  std::array<int16, 4096> buf{};
+  const size_t n = apu.readAudio(buf.data(), buf.size());
+  CHECK(n == available);
+  CHECK(apu.audioAvailable() == 0);
+}
+
+TEST_CASE("apu: SPC700 CALL/RET returns to the correct address") {
+  Apu apu;
+  apu.power();
+  apu.setControl(0x00);  // RAM mode
+  // 0xFFC0: MOV A,#$34 / CALL $0500 / MOV $00,A  (store $56 if RET works)
+  apu.setRam(0xFFC0, 0xE8); apu.setRam(0xFFC1, 0x34);
+  apu.setRam(0xFFC2, 0x3F); apu.setRam(0xFFC3, 0x00); apu.setRam(0xFFC4, 0x05);
+  apu.setRam(0xFFC5, 0xC4); apu.setRam(0xFFC6, 0x00);
+  // subroutine at $0500: MOV A,#$56 / RET
+  apu.setRam(0x0500, 0xE8); apu.setRam(0x0501, 0x56);
+  apu.setRam(0x0502, 0x6F);
+  apu.reset();  // pc = 0xFFC0
+  for (int i = 0; i < 16; i++) apu.step(21);
+  CHECK(apu.ram(0x0000) == 0x56);  // A=$56 survived the CALL/RET round-trip
+}
+
+TEST_CASE("apu: SPC700 ALU memory forms (dp,#imm and (X),(Y))") {
+  Apu apu;
+  apu.power();
+  apu.setControl(0x00);
+  // MOV A,#$41 / MOV $00,A / OR $00,#$0F / AND $00,#$7B
+  //   -> [$00] = ($41 | $0F) & $7B = $4F & $7B = $4B
+  apu.setRam(0xFFC0, 0xE8); apu.setRam(0xFFC1, 0x41);
+  apu.setRam(0xFFC2, 0xC4); apu.setRam(0xFFC3, 0x00);
+  apu.setRam(0xFFC4, 0x18); apu.setRam(0xFFC5, 0x0F); apu.setRam(0xFFC6, 0x00);
+  apu.setRam(0xFFC7, 0x38); apu.setRam(0xFFC8, 0x7B); apu.setRam(0xFFC9, 0x00);
+  apu.reset();
+  for (int i = 0; i < 16; i++) apu.step(21);
+  CHECK(apu.ram(0x0000) == 0x4B);
+}
+
+TEST_CASE("apu: SPC700 CMP X,#imm sets Z and branches correctly") {
+  Apu apu;
+  apu.power();
+  apu.setControl(0x00);
+  // MOV A,#$05 / MOV X,A / CMP X,#$05 / BNE +4 / MOV A,#$77 / MOV $00,A
+  //   -> CMP sets Z=1 so BNE is not taken, A=$77 is stored.
+  apu.setRam(0xFFC0, 0xE8); apu.setRam(0xFFC1, 0x05);
+  apu.setRam(0xFFC2, 0x5D);
+  apu.setRam(0xFFC3, 0xC8); apu.setRam(0xFFC4, 0x05);
+  apu.setRam(0xFFC5, 0xD0); apu.setRam(0xFFC6, 0x04);
+  apu.setRam(0xFFC7, 0xE8); apu.setRam(0xFFC8, 0x77);
+  apu.setRam(0xFFC9, 0xC4); apu.setRam(0xFFCA, 0x00);
+  apu.reset();
+  for (int i = 0; i < 16; i++) apu.step(21);
+  CHECK(apu.ram(0x0000) == 0x77);
+}
+
 }  // namespace snes

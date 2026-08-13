@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "snes/snes.hpp"
+#include "apu/apu.hpp"
 #include "ppu/ppu.hpp"
 #include "scheduler/scheduler.hpp"
 
@@ -27,8 +28,9 @@ static snes::Cartridge makeCart(snes::MapMode mode, size_t size, snes::uint8 sra
 TEST_CASE("bus: LoROM routing (ROM windows, SRAM, WRAM)") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x400000, 0x03);  // 4MB + 8KB SRAM
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   // Banks 40-5F mirror banks 00-3F:8000; 60-7D continue linearly.
@@ -63,8 +65,9 @@ TEST_CASE("bus: LoROM routing (ROM windows, SRAM, WRAM)") {
 TEST_CASE("bus: HiROM routing (ROM windows, WRAM mirrors, SRAM)") {
   snes::Cartridge cart = makeCart(snes::MapMode::hirom, 0x400000, 0x03);  // 4MB + 8KB SRAM
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   CHECK(bus.read(0x400000) == 0xEA);
@@ -100,8 +103,9 @@ TEST_CASE("bus: HiROM routing (ROM windows, WRAM mirrors, SRAM)") {
 TEST_CASE("bus: ExHiROM routing (two 4MB halves, no SRAM window)") {
   snes::Cartridge cart = makeCart(snes::MapMode::exhirom, 0x600000);  // 6MB, no SRAM
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   CHECK(bus.read(0x400000) == 0xEA);
@@ -120,8 +124,9 @@ TEST_CASE("bus: ExHiROM routing (two 4MB halves, no SRAM window)") {
 TEST_CASE("bus: multiply and divide ports") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   // $4202/$4203 WRMPYA/WRMPYB: 0x12 * 0x34 = 0x3A8.
@@ -155,8 +160,9 @@ TEST_CASE("bus: multiply and divide ports") {
 TEST_CASE("bus: WRAM port via $2180-$2183") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   // 17-bit address: WMADDL/WMADDM/WMADDH.
@@ -186,8 +192,9 @@ TEST_CASE("bus: WRAM port via $2180-$2183") {
 TEST_CASE("bus: PPU write-only shadows and open-bus reads") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   bus.write(0x002100, 0x0F);
@@ -207,26 +214,77 @@ TEST_CASE("bus: PPU write-only shadows and open-bus reads") {
 TEST_CASE("bus: APU ports R/W with mirroring") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
+  // A CPU write to $2140-$2143 lands in the SMP's input latch ($F4-$F7 side).
   bus.write(0x002140, 0x55);
-  CHECK(bus.apuPort(0) == 0x55);
-  CHECK(bus.read(0x002140) == 0x55);
+  CHECK(apu.inputPort(0) == 0x55);
+  // A CPU read of $2140 returns the SMP's output latch ($F4-$F7 write side).
+  apu.setOutputPort(0, 0xAA);
+  CHECK(bus.read(0x002140) == 0xAA);
+  CHECK(bus.apuPort(0) == 0xAA);
   // $2144-$217F mirror the four ports.
   bus.write(0x002144, 0x66);
-  CHECK(bus.apuPort(0) == 0x66);
+  CHECK(apu.inputPort(0) == 0x66);
   bus.write(0x002147, 0x77);
-  CHECK(bus.apuPort(3) == 0x77);
-  CHECK(bus.read(0x00217F) == 0x77);
+  CHECK(apu.inputPort(3) == 0x77);
+  apu.setOutputPort(3, 0x88);
+  CHECK(bus.read(0x00217F) == 0x88);
+}
+
+TEST_CASE("bus: joypad auto-read ($4218/$4219) and manual shift ($4016)") {
+  snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
+  snes::Ppu ppu;
+  snes::Apu apu;
+  snes::Scheduler scheduler(ppu);
+  snes::Bus bus(cart, ppu, scheduler, apu);
+  bus.power();
+
+  // Auto-read: 16-bit state, JOY1L = A/X/L/R, JOY1H = B/Y/Sel/Start/D-pad.
+  bus.setJoypad(0, 0x8000);           // B
+  CHECK(bus.read(0x004219) == 0x80);
+  CHECK(bus.read(0x004218) == 0x00);
+  bus.setJoypad(0, 0x0080);           // A
+  CHECK(bus.read(0x004218) == 0x80);
+  CHECK(bus.read(0x004219) == 0x00);
+  bus.setJoypad(0, 0x0010);           // R
+  CHECK(bus.read(0x004218) == 0x10);
+
+  // Manual read: latch on strobe, then shift out MSB-first
+  // (B, Y, Select, Start, ...). Here B=0x8000 and Y=0x4000 are pressed.
+  bus.setJoypad(0, 0xC000);
+  bus.write(0x004016, 0x01);  // strobe high -> latch
+  bus.write(0x004016, 0x00);  // strobe low -> shift mode
+  CHECK((bus.read(0x004016) & 0x01) == 1);  // B (first bit)
+  CHECK((bus.read(0x004016) & 0x01) == 1);  // Y
+  CHECK((bus.read(0x004016) & 0x01) == 0);  // Select
+  CHECK((bus.read(0x004016) & 0x01) == 0);  // Start
+  CHECK((bus.read(0x004016) & 0x01) == 0);  // Up
+  CHECK((bus.read(0x004016) & 0x01) == 0);  // Down
+  CHECK((bus.read(0x004016) & 0x01) == 0);  // Left
+  CHECK((bus.read(0x004016) & 0x01) == 0);  // Right
+  CHECK((bus.read(0x004016) & 0x01) == 0);  // A
+  CHECK((bus.read(0x004016) & 0x01) == 0);  // X
+  CHECK((bus.read(0x004016) & 0x01) == 0);  // L
+  CHECK((bus.read(0x004016) & 0x01) == 0);  // R
+
+  // Joypad 2 reads via $4017 (bit 0); bits 2-4 read 1 (pulled to GND).
+  bus.setJoypad(1, 0x8000);
+  bus.write(0x004016, 0x01);
+  bus.write(0x004016, 0x00);
+  CHECK((bus.read(0x004017) & 0x01) == 1);
+  CHECK((bus.read(0x004017) & 0x1C) == 0x1C);
 }
 
 TEST_CASE("bus: DMA channel registers and $43xF mirror") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   // Power-on: DMAPx=FF, A1Bx undefined (fullsnes xxh) -> FF in this impl.
@@ -247,8 +305,9 @@ TEST_CASE("bus: DMA channel registers and $43xF mirror") {
 TEST_CASE("bus: open bus reflects the last data-bus byte") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   bus.write(0x7E0000, 0xAB);
@@ -263,8 +322,9 @@ TEST_CASE("bus: open bus reflects the last data-bus byte") {
 TEST_CASE("bus: power and reset register semantics") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
 
   bus.power();
   // Power-on values from fullsnes (bracketed [=] only at power-on).
@@ -298,8 +358,9 @@ TEST_CASE("bus: power and reset register semantics") {
 TEST_CASE("bus: $4210 RDNMI read/ack vs $4212 live mirror (PPU)") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
   ppu.power();
 
@@ -328,8 +389,9 @@ TEST_CASE("bus: $4210 RDNMI read/ack vs $4212 live mirror (PPU)") {
 TEST_CASE("bus: $4200/$4209/$420A -> PPU V-IRQ, $4211 read/ack") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x40000);
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
   ppu.power();
 
@@ -360,8 +422,9 @@ TEST_CASE("bus: $4200/$4209/$420A -> PPU V-IRQ, $4211 read/ack") {
 TEST_CASE("bus: waitstates per memory region (fullsnes memory map)") {
   snes::Cartridge cart = makeCart(snes::MapMode::lorom, 0x400000, 0x03);
   snes::Ppu ppu;
+  snes::Apu apu;
   snes::Scheduler scheduler(ppu);
-  snes::Bus bus(cart, ppu, scheduler);
+  snes::Bus bus(cart, ppu, scheduler, apu);
   bus.power();
 
   // WRAM + mirrors: 8.

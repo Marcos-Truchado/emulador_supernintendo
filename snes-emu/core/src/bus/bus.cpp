@@ -1,7 +1,9 @@
 #include "snes/snes.hpp"
 
+#include "apu/apu.hpp"
 #include "ppu/ppu.hpp"
 #include "scheduler/scheduler.hpp"
+#include "serialize/serialize.hpp"
 
 #include <algorithm>
 
@@ -196,8 +198,9 @@ uint8 Bus::mmioRead(uint24 address) {
     return lastData_;
   }
   if (offs <= 0x213F) return latch(ppu_.readRegister(uint8(offs)));
-  // APU communication ports ($2140-$2143 + mirrors $2144-$217F).
-  if (offs >= 0x2140 && offs <= 0x217F) return latch(apuPort_[offs & 0x03]);
+  // APU communication ports ($2140-$2143 + mirrors $2144-$217F): reads
+  // return the SMP->CPU output latch, writes go to the CPU->SMP input latch.
+  if (offs >= 0x2140 && offs <= 0x217F) return latch(apu_.readPort(offs & 0x03));
   // WRAM port data, auto-incrementing 17-bit address.
   if (offs == 0x2180) {
     uint8 v = wram_[wramAddr_ & 0x1FFFF];
@@ -208,8 +211,15 @@ uint8 Bus::mmioRead(uint24 address) {
   if (offs >= 0x2181 && offs <= 0x2183) return lastData_;
   if (offs >= 0x2184 && offs <= 0x21FF) return lastData_;
 
-  // Manual joypad ports: no controllers attached -> 0.
-  if (offs == 0x4016 || offs == 0x4017) return latch(0x00);
+  // Manual joypad ports (serial shift, MSB-first: B, Y, Select, Start,
+  // Up, Down, Left, Right, A, X, L, R). $4016 bit0 = joypad 1, $4017 bit0 =
+  // joypad 2; $4017 bits 2-4 read 1 (pulled to GND, active-low).
+  if (offs == 0x4016 || offs == 0x4017) {
+    const int port = offs == 0x4016 ? 0 : 1;
+    const uint8 bit = uint8((joypadShift_[port] >> 15) & 1);
+    if (!joypadStrobe_) joypadShift_[port] = uint16(joypadShift_[port] << 1);
+    return latch(offs == 0x4016 ? bit : uint8(bit | 0x1C));
+  }
   if (offs >= 0x4018 && offs <= 0x41FF) return lastData_;
 
   // CPU write-only registers $4200-$420F: reads are open bus.
@@ -225,7 +235,16 @@ uint8 Bus::mmioRead(uint24 address) {
       case 0x4215: return latch(divQuotient_ >> 8);
       case 0x4216: return latch(mathResult_ & 0xFF);
       case 0x4217: return latch(mathResult_ >> 8);
-      default: return latch(0x00);  // $4218-$421F joypads: none connected
+      // $4218-$421F auto-read joypad registers (16-bit button state per
+      // controller: low byte A/X/L/R, high byte B/Y/Sel/Start/D-pad).
+      case 0x4218: return latch(joypad_[0] & 0xFF);
+      case 0x4219: return latch(joypad_[0] >> 8);
+      case 0x421A: return latch(joypad_[1] & 0xFF);
+      case 0x421B: return latch(joypad_[1] >> 8);
+      case 0x421C: return latch(joypad_[2] & 0xFF);
+      case 0x421D: return latch(joypad_[2] >> 8);
+      case 0x421E: return latch(joypad_[3] & 0xFF);
+      case 0x421F: return latch(joypad_[3] >> 8);
     }
   }
   if (offs < 0x4300) return lastData_;  // $4220-$42FF unused
@@ -249,8 +268,8 @@ void Bus::mmioWrite(uint24 address, uint8 data) {
     ppu_.writeRegister(uint8(offs - 0x2100), data);
     return;
   }
-  // APU ports $2140-$2143 + mirrors $2144-$217F (real APU in Phase 6).
-  if (offs >= 0x2140 && offs <= 0x217F) return void(apuPort_[offs & 0x03] = data);
+  // APU ports $2140-$2143 + mirrors $2144-$217F (real APU, phase 6/7).
+  if (offs >= 0x2140 && offs <= 0x217F) return void(apu_.writePort(offs & 0x03, data));
   // WRAM port.
   if (offs == 0x2180) {
     wram_[wramAddr_ & 0x1FFFF] = data;
@@ -265,8 +284,17 @@ void Bus::mmioWrite(uint24 address, uint8 data) {
     }
     return;
   }
-  // Joypad output strobe (no controllers; stored for later phases).
-  if (offs == 0x4016) return;
+  // Joypad output strobe ($4016 bit 0): latch the manual-read shift
+  // registers on the rising edge; while strobe is high the shift register
+  // is "stuck" on the B bit (fullsnes).
+  if (offs == 0x4016) {
+    const bool strobe = (data & 1) != 0;
+    if (strobe && !joypadStrobe_) {
+      for (int p = 0; p < 4; p++) joypadShift_[p] = joypad_[p];
+    }
+    joypadStrobe_ = strobe;
+    return;
+  }
   if (offs >= 0x4018 && offs <= 0x41FF) return;  // unused
 
   // CPU on-chip registers.
@@ -526,9 +554,11 @@ void Bus::power() {
   divQuotient_ = 0;
   mathResult_ = 0;
   std::fill(std::begin(ppuReg_), std::end(ppuReg_), 0);
-  std::fill(std::begin(apuPort_), std::end(apuPort_), 0);
   std::fill(std::begin(cpuReg_), std::end(cpuReg_), 0);
   std::fill(std::begin(dmaReg_), std::end(dmaReg_), 0xFF);
+  std::fill(std::begin(joypad_), std::end(joypad_), 0);
+  std::fill(std::begin(joypadShift_), std::end(joypadShift_), 0);
+  joypadStrobe_ = false;
 
   // Power-on values (fullsnes I/O map right column).
   cpuReg_[0x01] = 0xFF;  // 4201 WRIO
@@ -554,9 +584,67 @@ void Bus::reset() {
 // ---- register readback (tests / later phases) ----
 
 uint8 Bus::ppuRegister(uint8 offset) const { return ppuReg_[offset & 0x33]; }
-uint8 Bus::apuPort(uint8 index) const { return apuPort_[index & 0x03]; }
+uint8 Bus::apuPort(uint8 index) const { return apu_.readPort(index & 0x03); }
 uint8 Bus::cpuRegister(uint8 offset) const { return cpuReg_[offset & 0x0F]; }
 uint8 Bus::dmaRegister(uint8 offset) const { return dmaReg_[offset & 0x7F]; }
 uint32 Bus::wramAddress() const { return wramAddr_; }
+
+auto Bus::setJoypad(int port, uint16 buttons) -> void {
+  if (port < 0 || port >= 4) return;
+  joypad_[port] = buttons;
+}
+
+// ---- save states ----
+
+auto Bus::serialize(Writer& w) const -> void {
+  w.raw(wram_.data(), wram_.size());
+  w.u32(uint32(sram_.size()));
+  w.raw(sram_.data(), sram_.size());
+  w.u8(lastData_);
+  w.u32(wramAddr_);
+  w.u8(mpyA_);
+  w.u16(divDividend_);
+  w.u16(divQuotient_);
+  w.u16(mathResult_);
+  w.raw(ppuReg_, sizeof(ppuReg_));
+  w.raw(cpuReg_, sizeof(cpuReg_));
+  w.raw(dmaReg_, sizeof(dmaReg_));
+  for (int c = 0; c < 8; c++) {
+    w.u16(hdma_[c].tableAddr);
+    w.u16(hdma_[c].dataAddr);
+    w.u8(hdma_[c].remaining);
+    w.b(hdma_[c].repeat);
+    w.b(hdma_[c].firstLine);
+  }
+  w.raw(joypad_, sizeof(joypad_));
+  w.raw(joypadShift_, sizeof(joypadShift_));
+  w.b(joypadStrobe_);
+}
+
+auto Bus::deserialize(Reader& r) -> void {
+  r.raw(wram_.data(), wram_.size());
+  const uint32 sramSize = r.u32();
+  sram_.resize(sramSize);
+  r.raw(sram_.data(), sram_.size());
+  lastData_ = r.u8();
+  wramAddr_ = r.u32();
+  mpyA_ = r.u8();
+  divDividend_ = r.u16();
+  divQuotient_ = r.u16();
+  mathResult_ = r.u16();
+  r.raw(ppuReg_, sizeof(ppuReg_));
+  r.raw(cpuReg_, sizeof(cpuReg_));
+  r.raw(dmaReg_, sizeof(dmaReg_));
+  for (int c = 0; c < 8; c++) {
+    hdma_[c].tableAddr = r.u16();
+    hdma_[c].dataAddr = r.u16();
+    hdma_[c].remaining = r.u8();
+    hdma_[c].repeat = r.b();
+    hdma_[c].firstLine = r.b();
+  }
+  r.raw(joypad_, sizeof(joypad_));
+  r.raw(joypadShift_, sizeof(joypadShift_));
+  joypadStrobe_ = r.b();
+}
 
 }  // namespace snes

@@ -28,11 +28,17 @@ auto Apu::power() -> void {
   std::fill(std::begin(outx_), std::end(outx_), 0);
   std::fill(std::begin(brrOffset_), std::end(brrOffset_), 0);
   std::fill(std::begin(brrNibble_), std::end(brrNibble_), 0);
+  std::fill(std::begin(timerDivider_), std::end(timerDivider_), 0xFF);
+  std::fill(std::begin(timerOut_), std::end(timerOut_), 0);
+  std::fill(std::begin(timerCounter_), std::end(timerCounter_), 0);
   a_ = x_ = y_ = sp_ = psw_ = 0;
   pc_ = 0;
   dspAddr_ = 0;
   counter_ = 0;
-  timerClock_ = 0;
+  sampleClock_ = 0;
+  timerClock16_ = 0;
+  timerClock128_ = 0;
+  audioWr_ = audioRd_ = audioCount_ = 0;
   port_[0x01] = 0xB0;  // $F1: ROM enabled at $FFC0-$FFFF (power-on)
   dsp_[0x6C] = 0xE0;  // FLG: muted on reset (fullsnes)
   reset();
@@ -57,8 +63,8 @@ auto Apu::read(uint16 addr) -> uint8 {
       case 0xF3: return dspRead(uint8(dspAddr_));  // DSPDATA
       case 0xF4: case 0xF5: case 0xF6: case 0xF7: return apuIn_[addr - 0xF4];  // CPUIO in
       case 0xFD: case 0xFE: case 0xFF: {  // TnOUT (reset on read)
-        const uint8 v = uint8(port_[addr & 0x0F] & 0x0F);
-        port_[addr & 0x0F] = 0;
+        const uint8 v = timerOut_[addr - 0xFD] & 0x0F;
+        timerOut_[addr - 0xFD] = 0;
         return v;
       }
       default: return port_[addr & 0x0F];
@@ -74,10 +80,17 @@ void Apu::write(uint16 addr, uint8 data) {
       case 0xF4: case 0xF5: case 0xF6: case 0xF7: break;  // CPUIO out (below)
       case 0xF1:  // CONTROL: bit 7 selects ROM/RAM at $FFC0-$FFFF
         if (!(data & 0x80)) std::copy(std::begin(bootRom_), std::end(bootRom_), ram_ + 0xFFC0);
+        // bits 0-2 enable the three timers; disabling resets TnOUT + reload.
+        for (int n = 0; n < 3; n++) {
+          if (!(data & (1 << n))) { timerOut_[n] = 0; timerCounter_[n] = 0; }
+        }
         break;
       case 0xF2: dspAddr_ = data & 0x7F; break;
       case 0xF3: dspWrite(uint8(dspAddr_), data); break;
-      case 0xFA: case 0xFB: case 0xFC: timerDivider_[addr - 0xFA] = data; break;
+      case 0xFA: case 0xFB: case 0xFC:  // TnDIV: set divider + reload counter
+        timerDivider_[addr - 0xFA] = data;
+        timerCounter_[addr - 0xFA] = 0;
+        break;
       default: break;
     }
     port_[addr & 0x0F] = data;
@@ -86,7 +99,7 @@ void Apu::write(uint16 addr, uint8 data) {
 
 // main-CPU ports $2140-$2143
 auto Apu::writePort(int index, uint8 data) -> void { apuIn_[index] = data; }
-auto Apu::readPort(int index) -> uint8 { return port_[0x04 + index]; }
+auto Apu::readPort(int index) const -> uint8 { return port_[0x04 + index]; }
 
 auto Apu::ram(uint16 address) const -> uint8 { return ram_[address]; }
 auto Apu::dspRegister(uint8 index) const -> uint8 { return dsp_[index & 0x7F]; }
@@ -174,51 +187,95 @@ auto Apu::stepInstruction() -> int {
       uint16 storeAddr = 0;
       bool store = false;
       uint8 v = 0;
+      uint8 acc = a_;  // first operand: A for the A-forms, memory for RMW forms
       switch (sub) {
         case 0x04: v = readDp(readOp()); break;
         case 0x05: v = read(readAbs()); break;
         case 0x06: v = readDp(x_); break;
         case 0x07: v = read(read16Dp(uint8(readOp() + x_))); break;
         case 0x08: v = readOp(); break;
-        case 0x09: { const uint8 a = readOp(); const uint8 b = readOp(); v = readDp(b); storeAddr = uint16(uint16(zp) << 8) | a; store = true; } break;
+        case 0x09: {  // [aa] op [bb], encoded "bb aa" (fullsnes x+09 bb aa)
+          const uint8 b = readOp();  // bb (second operand)
+          const uint8 a = readOp();  // aa (first/destination operand)
+          acc = readDp(a);
+          v = readDp(b);
+          storeAddr = uint16(uint16(zp) << 8) | a;
+          store = true;
+        } break;
         case 0x14: v = readDp(uint8(readOp() + x_)); break;
         case 0x15: v = read(readAbs() + x_); break;
         case 0x16: v = read(readAbs() + y_); break;
         case 0x17: v = read(read16Dp(readOp()) + y_); break;
-        case 0x18: v = readOp(); storeAddr = uint16(uint16(zp) << 8) | readOp(); store = true; break;
-        case 0x19: v = readDp(y_); storeAddr = uint16(uint16(zp) << 8) | x_; store = true; break;
+        case 0x18: {  // [aa] op nn, encoded "nn aa" (fullsnes x+18 nn aa)
+          v = readOp();          // nn (immediate)
+          const uint8 a = readOp();  // aa (destination)
+          acc = readDp(a);
+          storeAddr = uint16(uint16(zp) << 8) | a;
+          store = true;
+        } break;
+        case 0x19: {  // [X] op [Y]
+          acc = readDp(x_);
+          v = readDp(y_);
+          storeAddr = uint16(uint16(zp) << 8) | x_;
+          store = true;
+        } break;
       }
       int cycles = (sub == 0x08) ? 2 : (sub == 0x04 || sub == 0x06) ? 3
                  : (sub == 0x05 || sub == 0x14) ? 4
                  : (sub == 0x15 || sub == 0x16 || sub == 0x18 || sub == 0x19) ? 5 : 6;
-      uint8 r = a_;
-      if (aluOp == 3) {  // CMP: flags only
-        const int d = a_ - v;
+      if (aluOp == 3) {  // CMP: flags only (acc - v)
+        const int d = acc - v;
         setFlag(kC, d >= 0);
         setNZ(uint8(d));
         return cycles;
       }
-      if (aluOp == 0) r = uint8(a_ | v);
-      else if (aluOp == 1) r = uint8(a_ & v);
-      else if (aluOp == 2) r = uint8(a_ ^ v);
+      uint8 r = acc;
+      if (aluOp == 0) r = uint8(acc | v);
+      else if (aluOp == 1) r = uint8(acc & v);
+      else if (aluOp == 2) r = uint8(acc ^ v);
       else if (aluOp == 4) {  // ADC
         const int c = flag(kC) ? 1 : 0;
-        const int d = a_ + v + c;
-        setFlag(kH, ((a_ & 0xF) + (v & 0xF) + c) > 0xF);
-        setFlag(kV, ((a_ ^ v) & 0x80) == 0 && ((a_ ^ d) & 0x80) != 0);
+        const int d = acc + v + c;
+        setFlag(kH, ((acc & 0xF) + (v & 0xF) + c) > 0xF);
+        setFlag(kV, ((acc ^ v) & 0x80) == 0 && ((acc ^ d) & 0x80) != 0);
         setFlag(kC, d > 0xFF);
         r = uint8(d);
       } else {  // SBC
         const int c = flag(kC) ? 0 : 1;
-        const int d = a_ - v - c;
-        setFlag(kH, ((a_ & 0xF) - (v & 0xF) - c) >= 0);
-        setFlag(kV, ((a_ ^ v) & 0x80) != 0 && ((a_ ^ d) & 0x80) != 0);
+        const int d = acc - v - c;
+        setFlag(kH, ((acc & 0xF) - (v & 0xF) - c) >= 0);
+        setFlag(kV, ((acc ^ v) & 0x80) != 0 && ((acc ^ d) & 0x80) != 0);
         setFlag(kC, d >= 0);
         r = uint8(d);
       }
       setNZ(r);
       if (store) write(storeAddr, r); else a_ = r;
       return cycles;
+    }
+  }
+
+  // ---- CMP X / CMP Y (fullsnes: extra compare forms) ----
+  {
+    auto cmpX = [&](uint8 operand, int cycles) {
+      const int d = x_ - operand;
+      setFlag(kC, d >= 0);
+      setNZ(uint8(d));
+      return cycles;
+    };
+    auto cmpY = [&](uint8 operand, int cycles) {
+      const int d = y_ - operand;
+      setFlag(kC, d >= 0);
+      setNZ(uint8(d));
+      return cycles;
+    };
+    switch (op) {
+      case 0xC8: return cmpX(readOp(), 2);            // CMP X,#nn
+      case 0x3E: return cmpX(readDp(readOp()), 3);    // CMP X,dp
+      case 0x1E: return cmpX(read(readAbs()), 4);     // CMP X,!abs
+      case 0xAD: return cmpY(readOp(), 2);            // CMP Y,#nn
+      case 0x7E: return cmpY(readDp(readOp()), 3);    // CMP Y,dp
+      case 0x5E: return cmpY(read(readAbs()), 4);     // CMP Y,!abs
+      default: break;
     }
   }
 
@@ -417,9 +474,8 @@ auto Apu::stepInstruction() -> int {
 
   // ---- jumps/calls ----
   if ((op & 0x0F) == 0x01) {  // TCALL n
-    write(0x100 | uint8(sp_ - 1), uint8(pc_ >> 8));
-    write(0x100 | uint8(sp_ - 2), uint8(pc_));
-    sp_ -= 2;
+    write(0x100 | sp_, uint8(pc_ >> 8)); sp_--;
+    write(0x100 | sp_, uint8(pc_)); sp_--;
     const uint16 vec = uint16(read(0xFFDE - (op >> 4) * 2) | (uint16(read(0xFFDE - (op >> 4) * 2 + 1)) << 8));
     pc_ = vec;
     return 8;
@@ -433,15 +489,15 @@ auto Apu::stepInstruction() -> int {
     }
     case 0x3F: {  // CALL !abs
       const uint16 a = readAbs();
-      write(0x100 | uint8(sp_ - 1), uint8(pc_ >> 8));
-      write(0x100 | uint8(sp_ - 2), uint8(pc_));
-      sp_ -= 2; pc_ = a; return 8;
+      write(0x100 | sp_, uint8(pc_ >> 8)); sp_--;
+      write(0x100 | sp_, uint8(pc_)); sp_--;
+      pc_ = a; return 8;
     }
     case 0x4F: {  // PCALL uu
       const uint8 a = readOp();
-      write(0x100 | uint8(sp_ - 1), uint8(pc_ >> 8));
-      write(0x100 | uint8(sp_ - 2), uint8(pc_));
-      sp_ -= 2; pc_ = 0xFF00 | a; return 6;
+      write(0x100 | sp_, uint8(pc_ >> 8)); sp_--;
+      write(0x100 | sp_, uint8(pc_)); sp_--;
+      pc_ = 0xFF00 | a; return 6;
     }
     case 0x6F: {  // RET
       pc_ = uint16(read(0x100 | uint8(sp_ + 1)) | (read(0x100 | uint8(sp_ + 2)) << 8));
@@ -453,10 +509,9 @@ auto Apu::stepInstruction() -> int {
       sp_ += 3; return 6;
     }
     case 0x0F: {  // BRK
-      write(0x100 | uint8(sp_ - 1), uint8(pc_ >> 8));
-      write(0x100 | uint8(sp_ - 2), uint8(pc_));
-      write(0x100 | uint8(sp_ - 3), uint8(psw_ | kB));
-      sp_ -= 3;
+      write(0x100 | sp_, uint8(pc_ >> 8)); sp_--;
+      write(0x100 | sp_, uint8(pc_)); sp_--;
+      write(0x100 | sp_, uint8(psw_ | kB)); sp_--;
       setFlag(kI, false); setFlag(kB, true);
       pc_ = uint16(read(0xFFDE) | (read(0xFFDF) << 8)); return 8;
     }
@@ -587,13 +642,136 @@ auto Apu::step(uint64 masterCycles) -> void {
   counter_ += int(masterCycles);
   while (counter_ >= int(kMasterPerSmpCycle)) {
     counter_ -= int(kMasterPerSmpCycle);
-    if (stepInstruction() == 0) return;  // SLEEP/STOP: halt
-    if (++timerClock_ >= kSmpCyclesPerSample) {
-      timerClock_ = 0;
+    const int cycles = stepInstruction();
+    if (cycles == 0) return;  // SLEEP/STOP: halt
+    tickTimers(cycles);
+    sampleClock_ += cycles;
+    while (sampleClock_ >= kSmpCyclesPerSample) {
+      sampleClock_ -= kSmpCyclesPerSample;
       for (int n = 0; n < 8; n++) { decodeBrr(n); runEnvelope(n); }
       mixSample();
+      pushSample();
     }
   }
+}
+
+// ---- SMP timers ($FA-$FF) ----
+//
+// fullsnes "SPC700 I/O Ports": timers 0/1 are clocked at 8kHz (every 128 SMP
+// cycles), timer 2 at 64kHz (every 16 cycles). Each tick advances the timer's
+// internal counter; when it reaches the divider (0 = divide by 256) the 4-bit
+// TnOUT output increments and the counter resets. Timers only run while their
+// CONTROL ($F1) enable bit is set.
+void Apu::tickTimers(int cycles) {
+  timerClock16_ += cycles;
+  while (timerClock16_ >= 16) {
+    timerClock16_ -= 16;
+    tickTimer(2);
+  }
+  timerClock128_ += cycles;
+  while (timerClock128_ >= 128) {
+    timerClock128_ -= 128;
+    tickTimer(0);
+    tickTimer(1);
+  }
+}
+
+void Apu::tickTimer(int n) {
+  if (!(port_[0x01] & (1 << n))) return;
+  const int threshold = timerDivider_[n] == 0 ? 256 : timerDivider_[n];
+  if (++timerCounter_[n] >= threshold) {
+    timerCounter_[n] = 0;
+    timerOut_[n] = uint8((timerOut_[n] + 1) & 0x0F);
+  }
+}
+
+// ---- audio output (phase 7) ----
+
+void Apu::pushSample() {
+  if (audioCount_ + 2 > kAudioBuf) return;  // full: drop (shouldn't happen)
+  audioBuf_[audioWr_] = int16(sample_[0]) << 8;
+  audioWr_ = (audioWr_ + 1) % kAudioBuf;
+  audioBuf_[audioWr_] = int16(sample_[1]) << 8;
+  audioWr_ = (audioWr_ + 1) % kAudioBuf;
+  audioCount_ += 2;
+}
+
+auto Apu::readAudio(int16* buffer, size_t count) -> size_t {
+  const size_t n = std::min(count, audioCount_);
+  for (size_t i = 0; i < n; i++) {
+    buffer[i] = audioBuf_[audioRd_];
+    audioRd_ = (audioRd_ + 1) % kAudioBuf;
+  }
+  audioCount_ -= n;
+  return n;
+}
+
+// ---- save states ----
+
+auto Apu::serialize(Writer& w) const -> void {
+  w.raw(ram_, sizeof(ram_));
+  w.raw(port_, sizeof(port_));
+  w.raw(apuIn_, sizeof(apuIn_));
+  for (int n = 0; n < 3; n++) {
+    w.u8(uint8(timerDivider_[n] & 0xFF));
+    w.u8(timerOut_[n]);
+    w.u16(uint16(timerCounter_[n] & 0xFFFF));
+  }
+  w.u8(a_); w.u8(x_); w.u8(y_); w.u8(sp_); w.u8(psw_);
+  w.u16(pc_);
+  w.raw(dsp_, sizeof(dsp_));
+  w.u8(uint8(dspAddr_ & 0x7F));
+  for (int n = 0; n < 8; n++) {
+    w.u16(uint16(envx_[n] & 0xFFFF));
+    w.u16(uint16(outx_[n] & 0xFFFF));
+    w.u16(brrOffset_[n]);
+    w.u8(brrHeader_[n]);
+    w.u8(brrShift_[n]);
+    w.u8(brrFilter_[n]);
+    w.u8(brrNibble_[n]);
+    w.u16(uint16(brrPrev_[n][0] & 0xFFFF));
+    w.u16(uint16(brrPrev_[n][1] & 0xFFFF));
+  }
+  w.u8(uint8(sample_[0])); w.u8(uint8(sample_[1]));
+  w.u32(uint32(counter_));
+  w.u32(uint32(sampleClock_));
+  w.u32(uint32(timerClock16_));
+  w.u32(uint32(timerClock128_));
+}
+
+auto Apu::deserialize(Reader& r) -> void {
+  r.raw(ram_, sizeof(ram_));
+  r.raw(port_, sizeof(port_));
+  r.raw(apuIn_, sizeof(apuIn_));
+  for (int n = 0; n < 3; n++) {
+    timerDivider_[n] = r.u8();
+    timerOut_[n] = r.u8();
+    timerCounter_[n] = r.u16();
+  }
+  a_ = r.u8(); x_ = r.u8(); y_ = r.u8(); sp_ = r.u8(); psw_ = r.u8();
+  pc_ = r.u16();
+  r.raw(dsp_, sizeof(dsp_));
+  dspAddr_ = r.u8() & 0x7F;
+  for (int n = 0; n < 8; n++) {
+    envx_[n] = r.u16();
+    outx_[n] = int16(r.u16());
+    brrOffset_[n] = r.u16();
+    brrHeader_[n] = r.u8();
+    brrShift_[n] = r.u8();
+    brrFilter_[n] = r.u8();
+    brrNibble_[n] = r.u8();
+    brrPrev_[n][0] = int16(r.u16());
+    brrPrev_[n][1] = int16(r.u16());
+  }
+  sample_[0] = int8(r.u8());
+  sample_[1] = int8(r.u8());
+  counter_ = int(r.u32());
+  sampleClock_ = int(r.u32());
+  timerClock16_ = int(r.u32());
+  timerClock128_ = int(r.u32());
+  // the audio ring buffer is not part of a save state; it refills as the
+  // APU keeps running after load.
+  audioWr_ = audioRd_ = audioCount_ = 0;
 }
 
 }  // namespace snes
