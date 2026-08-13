@@ -53,6 +53,16 @@ struct BgFixture {
     if (getenv("PPU_DEBUG") && y == 1 && col <= 40) printf("raw y=1 col=%d -> %04X\n", col, v);
     return v;
   }
+  // Fill one 8bpp (256-color) tile at the given word address: every pixel
+  // is `color` (8 planes, packed two per word, one word-pair per row pair).
+  void tile8(uint16 address, uint8 color) {
+    for (int row = 0; row < 8; row++) {
+      vram(address + row, uint16((color & 1 ? 0xFF : 0) | (color & 2 ? 0xFF00 : 0)));
+      vram(address + 8 + row, uint16((color & 4 ? 0xFF : 0) | (color & 8 ? 0xFF00 : 0)));
+      vram(address + 16 + row, uint16((color & 16 ? 0xFF : 0) | (color & 32 ? 0xFF00 : 0)));
+      vram(address + 24 + row, uint16((color & 64 ? 0xFF : 0) | (color & 128 ? 0xFF00 : 0)));
+    }
+  }
 };
 
 TEST_CASE("ppu: mode 0 renders a 2bpp tile with map and char addressing") {
@@ -313,6 +323,67 @@ TEST_CASE("ppu: mode 3 8bpp tile and CG direct color") {
   CHECK(f.ppu.pixelColor(0, 2) == (0x8000 | 0x409C));
 }
 
+TEST_CASE("ppu: mode 4 8bpp BG1 renders 256-color tiles at stride 128") {
+  BgFixture f;
+  f.ppu.writeRegister(0x05, 0x04);  // mode 4
+  f.ppu.writeRegister(0x07, 0x00);  // BG1SC
+  f.ppu.writeRegister(0x09, 0x10);  // BG3SC (offset table) at 0x1000
+  f.ppu.writeRegister(0x0B, 0x02);  // BG1 tile base 0x2000
+  f.ppu.writeRegister(0x2C, 0x01);  // TM: BG1
+  f.vram(0x0000, 0x0000);  // (0,0): char 0
+  f.vram(0x0001, 0x0001);  // (1,0): char 1
+  // 8bpp chars: char c at 0x2000 + 128*c (mode 4 stride = 1 << (3+4)).
+  f.tile8(0x2000, 0x8F);  // char 0 -> color 0x8F
+  f.tile8(0x2080, 0x11);  // char 1 -> color 0x11
+  f.cgram(0x8F, 0x001F);
+  f.cgram(0x11, 0x7C00);
+  f.show();
+
+  f.paint(1, 0);
+  CHECK(f.ppu.pixelColor(0, 1) == (0x8000 | 0x001F));  // char 0 -> 0x8F
+  f.paint(1, 8);
+  CHECK(f.ppu.pixelColor(8, 1) == (0x8000 | 0x7C00));  // char 1 -> 0x11 (stride 128)
+}
+
+TEST_CASE("ppu: mode 4 offset-per-tile horizontal (bit 15=0, one-column lag)") {
+  BgFixture f;
+  f.ppu.writeRegister(0x05, 0x04);  // mode 4
+  f.ppu.writeRegister(0x07, 0x00);
+  f.ppu.writeRegister(0x09, 0x10);  // BG3SC (offset table) at 0x1000
+  f.ppu.writeRegister(0x0B, 0x02);
+  f.ppu.writeRegister(0x2C, 0x01);
+  // BG1 map: col c -> char c (distinct colors 0x11, 0x22, 0x33, 0x44).
+  f.vram(0x0000, 0x0000);
+  f.vram(0x0001, 0x0001);
+  f.vram(0x0002, 0x0002);
+  f.vram(0x0003, 0x0003);
+  // BG3 offset table. With vscroll -1 the hlookup fetch (y==0) reads offset
+  // row 31 (0x13E0+c). Mode 4: bit 15 = 0 (horizontal), bit 13 = BG1 valid.
+  f.vram(0x13E0, 0x0000);  // col 0: no offset
+  f.vram(0x13E1, 0x2008);  // col 1: hoffset 8 -> applied one column late
+  f.vram(0x13E2, 0x0000);  // col 2: no offset
+  f.tile8(0x2000, 0x11);  // char 0
+  f.tile8(0x2080, 0x22);  // char 1
+  f.tile8(0x2100, 0x33);  // char 2
+  f.tile8(0x2180, 0x44);  // char 3
+  f.cgram(0x11, 0x7FFF);
+  f.cgram(0x22, 0x03E0);
+  f.cgram(0x33, 0x7C00);
+  f.cgram(0x44, 0x001F);
+  f.show();
+
+  // One-column lag: the col-1 entry (offset 8) applies to col 2, so the
+  // display is [0, 1, 3, 3, ...].
+  f.paint(1, 0);
+  CHECK(f.ppu.pixelColor(0, 1) == (0x8000 | 0x7FFF));   // char 0
+  f.paint(1, 8);
+  CHECK(f.ppu.pixelColor(8, 1) == (0x8000 | 0x03E0));   // char 1
+  f.paint(1, 16);
+  CHECK(f.ppu.pixelColor(16, 1) == (0x8000 | 0x001F));  // char 3 (offset 8)
+  f.paint(1, 24);
+  CHECK(f.ppu.pixelColor(24, 1) == (0x8000 | 0x001F));  // char 3
+}
+
 TEST_CASE("ppu: mode 5 hires renders two half-pixels per dot") {
   BgFixture f;
   f.ppu.writeRegister(0x05, 0x05);  // mode 5
@@ -377,6 +448,30 @@ TEST_CASE("ppu: mode 6 hires with offset-per-tile at 16 half-pixel columns") {
   CHECK(f.raw(1, 26 + 0) == (0x8000 | 0x7FFF));
   CHECK(f.raw(1, 26 + 16) == (0x8000 | 0x03E0));
   CHECK(f.raw(1, 26 + 32) == (0x8000 | 0x7C00));
+}
+
+TEST_CASE("ppu: pseudoHires renders main/sub as half-pixel pairs") {
+  BgFixture f;
+  f.ppu.writeRegister(0x05, 0x00);  // mode 0 (non-hires)
+  f.ppu.writeRegister(0x33, 0x08);  // SETINI bit 3: pseudo hires
+  f.ppu.writeRegister(0x07, 0x00);  // BG1SC
+  f.ppu.writeRegister(0x08, 0x08);  // BG2SC
+  f.ppu.writeRegister(0x0B, 0x22);  // BG1/BG2 tile base 0x2000
+  f.ppu.writeRegister(0x0E, 0xFF); f.ppu.writeRegister(0x0E, 0x03);  // BG1 vscroll -1
+  f.ppu.writeRegister(0x10, 0xFF); f.ppu.writeRegister(0x10, 0x03);  // BG2 vscroll -1
+  f.ppu.writeRegister(0x2C, 0x01);  // TM: BG1 main
+  f.ppu.writeRegister(0x2D, 0x02);  // TS: BG2 sub
+  f.vram(0x0000, 0x0000);  // BG1 map (0,0): char 0
+  f.vram(0x0800, 0x0000);  // BG2 map (0,0): char 0
+  f.vram(0x2000, 0x00FF);  // char 0 row 0: color 1 (shared)
+  f.cgram(1, 0x7FFF);      // BG1 color 1 = white
+  f.cgram(33, 0x001F);     // BG2 color 1 = red (palette 32)
+  f.show();
+
+  f.paint(1, 0);
+  // Even half-pixel = sub screen (BG2 red), odd half-pixel = main (BG1 white).
+  CHECK(f.raw(1, 26 + 0) == (0x8000 | 0x001F));
+  CHECK(f.raw(1, 26 + 1) == (0x8000 | 0x7FFF));
 }
 
 TEST_CASE("ppu: mosaic repeats horizontal blocks and the block-top row") {

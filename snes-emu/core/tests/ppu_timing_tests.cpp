@@ -314,4 +314,35 @@ TEST_CASE("ppu: IRQ pin mirrors the $4211 latch (level model)") {
   CHECK(pin == true);
 }
 
+TEST_CASE("ppu: fieldBit uses the frame-start interlace latch") {
+  Ppu ppu;
+  ppu.power();
+  ppu.writeRegister(0x33, 0x01);  // SETINI bit 0: interlace ON
+  // Advance to frame 1 (field parity 1), latching interlace = ON at V=0.
+  ppu.step(262 * kLine);
+  ppu.step(10 * kLine);  // V=10 of frame 1
+  CHECK((ppu.readRegister(0x3F) & 0x80) == 0x80);  // field 1
+
+  // Disable interlace mid-frame: the latched value must not change.
+  ppu.writeRegister(0x33, 0x00);
+  CHECK((ppu.readRegister(0x3F) & 0x80) == 0x80);  // still field 1 (latched)
+}
+
+TEST_CASE("ppu: full frame renders once per frame and increments the counter") {
+  Ppu ppu;
+  ppu.power();
+  CHECK(ppu.frameWidth() == 564);
+  CHECK(ppu.frameHeight() == 242);
+  CHECK(ppu.renderedFrames() == 0);
+
+  ppu.step(240 * kLine);  // to V=240 of frame 0
+  CHECK(ppu.renderedFrames() == 1);
+
+  ppu.step(262 * kLine);  // -> V=240 of frame 1
+  CHECK(ppu.renderedFrames() == 2);
+
+  ppu.step(262 * kLine);  // -> V=240 of frame 2
+  CHECK(ppu.renderedFrames() == 3);
+}
+
 }  // namespace snes

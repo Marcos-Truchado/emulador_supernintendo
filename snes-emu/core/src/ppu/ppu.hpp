@@ -448,9 +448,9 @@ class Ppu : public Thread {
   auto fetchSlot(uint32 slot) -> void;  // per-dot fetch dispatch by BG mode
   auto startLine() -> void;  // H=0: frame start (V=0 only) + engine line starts
   auto vdisp() const -> uint32 { return state_.vdisp; }
-  // Field parity derives from SETINI.0 directly until the per-frame
-  // latching lands (phase 4 frame-start work); the latch then replaces it.
-  auto fieldBit() const -> bool { return io_.interlace && (frame_ & 1); }
+  // Field parity derives from the interlace bit latched at frame start
+  // (state_.interlace, see startLine) combined with the frame parity.
+  auto fieldBit() const -> bool { return state_.interlace && (frame_ & 1); }
   auto overscanActive() const -> bool { return state_.overscan; }
 
   // ---- phase 4 MMIO helpers ----

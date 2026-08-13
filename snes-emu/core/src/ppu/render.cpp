@@ -267,8 +267,8 @@ auto Ppu::Layer::mode7Draw() -> void {
   int pixelY = (originY + c * x) >> 8;
   uint16 paletteAddress = ((pixelY & 7) << 3) | (pixelX & 7);
 
-  uint16 tileX = pixelX >> 3;
-  uint16 tileY = pixelY >> 3;
+  uint16 tileX = (pixelX >> 3) & 0x7F;
+  uint16 tileY = (pixelY >> 3) & 0x7F;
   uint16 tileAddress = (tileY << 7) | tileX;
 
   bool outOfBounds = (pixelX | pixelY) & ~1023;

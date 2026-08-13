@@ -15,8 +15,10 @@ El proyecto es un emulador de SNES en C++20 estilo higan/bsnes
 (dot/cycle-accurate), con el core totalmente desacoplado del frontend.
 Completadas: **Fase 0 (esqueleto/build)** + **Fase 1 (CPU 65816 aislada)** +
 **Fase 2 (bus mínimo + memoria + WRAM)** + **Fase 3 (scheduler + PPU
-timing-only)** + **Fase 3b (entrega real de NMI/IRQ al CPU)**. **NO tocar
-APU/DMA** (Fases 5/6); rendering es Fase 4.
+timing-only)** + **Fase 3b (entrega real de NMI/IRQ al CPU)** + **Fase 4
+(rendering PPU completo: fondos, sprites, ventanas, color math, modo 7)**.
+Próximas: **Fase 5 (DMA/HDMA)**, **Fase 6 (APU: SMP+DSP)**, **Fase 7
+(integración con juegos comerciales)** — ver §11.
 
 Estado actual:
 
@@ -545,22 +547,17 @@ borde, copiada en `docs_documentacion/refs/`):
 ```bash
 cmake --build build --target snes_tests        # desde snes-emu/
 ./build/core/tests/snes_tests --test-case="ppu:*"
-# 51 test cases | 51 passed | 0 failed | 34 skipped (los 34 son cpu/bus/cart/
+# 66 test cases | 66 passed | 0 failed | 34 skipped (los 34 son cpu/bus/cart/
 # scheduler/interrupt, no correr con el filtro ppu:*)
-# assertions: 269174 | 269174 passed | 0 failed
+# assertions: 269237 | 269237 passed | 0 failed
 ./build/core/tests/snes_tests                 # suite completa
-# 85 test cases | 85 passed | 0 failed | assertions: 269463
+# 100 test cases | 100 passed | 0 failed | assertions: 269526
 # cputest-full/basic y la ROM de fase 3 siguen verdes (validación §8.3)
 ```
 
-**TODO VERDE (2026-08-13)**: los 11 test cases de sprites/OAM
-(`ppu_sprite_tests.cpp`) están en verde — ver §10.9. La suite completa pasa
-**85/85 test cases / 269463 assertions**.
-
-**TODO VERDE (2026-08-12)**: los 3 test cases que estaban en rojo (`mode 5
-hires`, `mode 6 hires`, `INIDISP forced blank`) pasan. Los 9 fallos de §10.4
-están resueltos — el único que exigió tocar el core era Bug A (pickSub);
-el resto eran bugs de test (ver §10.8).
+**FASE 4 COMPLETA (2026-08-13)**: 100/100 test cases, 269,526 assertions.
+Fondos, sprites, ventanas, color math, modo 7, pseudoHires y el latch de campo
+están implementados y en verde — ver §10.10 para el cierre y el detalle.
 
 ## 10.2 HECHO Y COMPROBADO (verde — NO re-depurar)
 
@@ -849,3 +846,65 @@ cmake --build build --target snes_tests
 ./build/tools/cputest/snes_cputest third_party/cputest/cputest-basic.sfc  # SUCCESS
 ./build/tools/fase3/snes_fase3 build/tools/fase3/fase3_timing.sfc         # SUCCESS
 ```
+
+## 10.10 Cierre de fase 4 (2026-08-13) — modo 7, color math, pseudoHires, latch de campo, trama completa
+
+La fase 4 (renderizado real del PPU) queda **COMPLETA**: 100/100 test cases,
+269,526 assertions. Todos los subsistemas de render están implementados y con
+tests sintéticos verdes:
+
+| Área | Tests |
+|---|---|
+| MMIO `$2100-$213F` | `ppu_mmio_tests.cpp` (21) |
+| Fondos modos 0-6 (2bpp/4bpp/8bpp, mosaic, offset-per-tile, hires, INIDISP) | `ppu_bg_tests.cpp` (13) |
+| mode 4 (8bpp + offset-per-tile) | `ppu_bg_tests.cpp` (2) |
+| pseudoHires (`$2133` bit 3) | `ppu_bg_tests.cpp` (1) |
+| Sprites/OAM | `ppu_sprite_tests.cpp` (11) |
+| Ventanas (`$2123-$212B`, TMW/TSW, color window) | `ppu_window_tests.cpp` (3) |
+| Color math (add/sub, halve, fixed color, backdrop) | `ppu_colormath_tests.cpp` (3) |
+| Modo 7 (identidad, rotación, screen-over, EXTBG) | `ppu_mode7_tests.cpp` (4) |
+| Latch de interlace/overscan (`fieldBit`) | `ppu_timing_tests.cpp` (1) |
+| Trama completa (renderedFrames, geometría) | `ppu_timing_tests.cpp` (1) |
+
+Últimos cierres (los tres puntos que quedaban de `fase4_estado_plan.md` §3):
+
+- **`fieldBit()` con el latch** (`ppu.hpp`): ahora lee `state_.interlace`
+  (latcheado en `startLine` en V=0) en lugar de `io_.interlace` (vivo). Test:
+  el campo no cambia si se deshabilita interlace a mitad de frame.
+- **pseudoHires** (`ppu_bg_tests.cpp`): en modo 0 con `$2133` bit 3, cada dot
+  pinta dos half-píxeles — par = sub (BG2), impar = main (BG1).
+- **Verificación de trama completa** (`ppu_timing_tests.cpp`): `renderedFrames`
+  incrementa una vez por frame (en V=240) y la geometría del framebuffer es
+  564×242.
+
+Bug del core corregido en modo 7 durante esta fase: `mode7Draw` no enmascaraba
+`tileX/tileY` a 7 bits (usaba `uint16` en vez del `n7` de ares), así que el
+wrap (`repeatMode7` 0/1) de píxeles fuera de rango leía el tile equivocado —
+el bit 7 de `tileX` se colaba en `tileY`. Fix: `& 0x7F` (ver `update.md` y
+`ppu_mode7_tests.cpp` "screen-over").
+
+### Faltan los tests visuales (homebrew ROM)
+
+Los tests sintéticos cubren cada componente aislado, pero **falta la validación
+visual de extremo a extremo**: un ROM homebrew sencillo que renderice sprites,
+fondos, modo 7 y color math a la vez y se compare contra un emulador de
+referencia (ares) o fullsnes. Queda pendiente para más adelante.
+
+## 11. Próximas fases (5-6-7)
+
+Fase 4 cerrada. Lo que sigue (roadmap `emulador_snes_diseno.md` §9):
+
+- **Fase 5 — DMA y HDMA**: DMA general primero (más simple), luego HDMA
+  (depende de que el timing por scanline de fase 3/4 ya sea exacto). Criterio
+  de salida: efectos de raster típicos (gradiente por HDMA) se ven correctos.
+- **Fase 6 — APU: SMP + DSP**: el SPC700 (SMP) + DSP, puertos `$2140-$217F`,
+  formato BRR. Comunicación CPU↔APU por los 4 puertos de I/O (no hay bus
+  compartido).
+- **Fase 7 — Integración con juegos comerciales reales**: validación contra
+  juegos comerciales y chips especiales (SA-1, SuperFX, DSP-1) — estos se dejan
+  fuera a propósito hasta esta fase.
+
+Pendientes menores documentados de fase 4 (no bloquean): PAL, líneas
+largas/cortas (341/342/340), refresh DRAM, sync de contadores en V=128, e
+interlace de campo completo (STAT78 bit 7 usa `frame_ & 1`, sin contador de
+campo separado).
