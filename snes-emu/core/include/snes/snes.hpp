@@ -42,6 +42,7 @@ class Cpu65816;
 class Thread;
 class Scheduler;
 class Ppu;
+class Apu;
 
 enum class MapMode {
   unknown,
@@ -186,12 +187,15 @@ class System {
   auto cartridge() const -> const Cartridge&;
   auto ppu() -> Ppu&;
   auto ppu() const -> const Ppu&;
+  auto apu() -> Apu&;
+  auto apu() const -> const Apu&;
   auto scheduler() -> Scheduler&;
   auto scheduler() const -> const Scheduler&;
 
  private:
   std::unique_ptr<Cartridge> cartridge_;
   std::unique_ptr<Ppu> ppu_;
+  std::unique_ptr<Apu> apu_;
   std::unique_ptr<Scheduler> scheduler_;
   std::unique_ptr<Bus> bus_;
   std::unique_ptr<Cpu65816> cpu_;

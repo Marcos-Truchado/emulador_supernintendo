@@ -21,17 +21,22 @@ namespace snes {
 // conversion lives inside that thread's step().
 class Scheduler {
  public:
-  // The cooperative thread that sync() drives (the PPU in phase 3).
-  explicit Scheduler(Thread& thread) : thread_(thread) {}
+  // The cooperative thread(s) that sync() drives: the PPU in phase 3, and an
+  // optional secondary thread (the APU in phase 6, its own clock ratio inside
+  // its step()).
+  explicit Scheduler(Thread& thread, Thread* secondary = nullptr)
+      : thread_(thread), secondary_(secondary) {}
 
   // The CPU consumed masterCycles of the master clock (6 for an internal
   // cycle, 6/8/12 for a bus access depending on the address).
   auto step(uint64 masterCycles) -> void { delta_ += masterCycles; }
 
-  // Advance the cooperative thread until it is within one dot of the CPU.
+  // Advance the cooperative thread(s) until the primary is within one dot of
+  // the CPU.
   auto sync() -> void {
     while (delta_ >= 4) {  // one full dot (4 master cycles) ahead
       thread_.step(4);
+      if (secondary_) secondary_->step(4);
       delta_ -= 4;
     }
   }
@@ -43,6 +48,7 @@ class Scheduler {
 
  private:
   Thread& thread_;
+  Thread* secondary_ = nullptr;
   std::int64_t delta_ = 0;  // CPU master cycles - thread master cycles
 };
 

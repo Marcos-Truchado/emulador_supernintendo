@@ -17,9 +17,8 @@ Completadas: **Fase 0 (esqueleto/build)** + **Fase 1 (CPU 65816 aislada)** +
 **Fase 2 (bus mínimo + memoria + WRAM)** + **Fase 3 (scheduler + PPU
 timing-only)** + **Fase 3b (entrega real de NMI/IRQ al CPU)** + **Fase 4
 (rendering PPU completo: fondos, sprites, ventanas, color math, modo 7)** +
-**Fase 5 (DMA/HDMA)**.
-Próximas: **Fase 6 (APU: SMP+DSP)**, **Fase 7 (integración con juegos
-comerciales)** — ver §12.
+**Fase 5 (DMA/HDMA)** + **Fase 6 (APU: SMP + DSP)**.
+Próxima: **Fase 7 (integración con juegos comerciales)** — ver §13.
 
 Estado actual:
 
@@ -948,14 +947,66 @@ cmake --build build --target snes_tests
 ./build/tools/fase3/snes_fase3 build/tools/fase3/fase3_timing.sfc         # SUCCESS
 ```
 
-## 12. Próximas fases (6-7)
+## 12. Fase 6 — APU: SMP + DSP (COMPLETADA)
 
-- **Fase 6 — APU: SMP + DSP**: el SPC700 (SMP) + DSP, puertos `$2140-$217F`,
-  formato BRR. Comunicación CPU↔APU por los 4 puertos de I/O (no hay bus
-  compartido). El scheduler ya reserva el hueco (ratio 21:24 en `thread.hpp`).
-- **Fase 7 — Integración con juegos comerciales reales**: validación contra
-  juegos comerciales y chips especiales (SA-1, SuperFX, DSP-1) — estos se dejan
-  fuera a propósito hasta esta fase.
+Implementado en `core/src/apu/apu.hpp`/`apu.cpp`. Referencia: fullsnes
+("SPC700 CPU", "DSP BRR Samples", "ADSR/Gain Envelope", "Volume Registers").
+
+### 12.1 Implementado
+
+- **SMP (SPC700)**: intérprete completo de los 256 opcodes (load/store, ALU
+  OR/AND/EOR/CMP/ADC/SBC, rotate/shift/inc/dec, 16-bit ADDW/SUBW/CMPW/INCW/
+  DECW/MUL/DIV, 1-bit SET1/CLR1/NOT1/MOV1/OR1/AND1/EOR1, DAA/DAS/XCN/TCLR/
+  TSET, ramas, TCALL/PCALL/CALL/JMP/RET/RET1/BRK). 64KB de RAM privada, 64
+  bytes de boot ROM (`$FFC0-$FFFF`), puertos I/O `$00F0-$00FF` (DSPADDR/DSPDATA,
+  CPUIO `$F4-$F7`, timers, control ROM/RAM), flags NVPBHIZC, addressing de
+  zero-page con flag P.
+- **DSP (S-DSP)**: 128 registros (`$F2/$F3` indirectos), 8 voces, decodificador
+  **BRR** (shift + 4 filtros exactos de fullsnes), envolvente ADSR/gain
+  (attack + sustain + direct gain), mixer estéreo con volúmenes por voz y
+  master, mute (FLG), KON/KOFF/ENDX/FLG soft-reset.
+- **Integración**: el `Scheduler` ahora avanza un hilo secundario (la APU) en
+  `sync()`; `System` crea la APU, la cablea y hace `apu_->power()/reset()`.
+  La APU corre a 21 master cycles por ciclo SPC700 (ratio 21:24; la conversión
+  vive dentro de su `step()`), y el DSP genera 1 muestra por 32 ciclos SMP.
+- **Tests** (`core/tests/apu_tests.cpp`, 3 test cases): el boot ROM arranca y
+  señaliza al CPU (`$F4=AA`/`$F5=BB`), un mini-programa (ADC + push/xcn/pop),
+  y el decodificador BRR produce una muestra no nula tras KON.
+
+### 12.2 Bugs corregidos
+
+| Bug | Resolución |
+|---|---|
+| `read()/write()` usaban `addr >= 0xF0` y atrapaban la ROM `$FFC0-$FFFF` | acotado a `addr >= 0xF0 && addr < 0x0100` (los puertos I/O son la página 00) |
+| SET1/CLR1/BBS/BBC usaban `op & 0x0F` y `op >> 4` | el bit está en `op >> 5` y el sub-opcode en `op & 0x1F` (b\*20h+xx) |
+
+### 12.3 Refinamientos documentados (no bloquean)
+
+- **Echo/reverb** (ESA/EDL/EON/EVOL/FIR) no generado; el mixer solo hace la
+  salida directa. Añadir cuando se quiera audio con eco.
+- **Interpolación gaussiana**: se usa la muestra BRR sin interpolar (como si el
+  pitch fuera 0x1000). La tabla de Gauss de fullsnes es el upgrade.
+- **Noise y pitch modulation (NON/PMON)** y **ADSR completo** (decay/release
+  por pasos) simplificados.
+- **Timers** `$FA-$FF` almacenados pero sin contar (solo `TnOUT` leído=0).
+- **Puertos `$2140-$2143`** no cableados al bus (el bus sigue con `apuPort_`
+  de storage); el audio no sale al frontend todavía (eso es fase 7/integración).
+
+### 12.4 Validación
+
+```bash
+cmake --build build --target snes_tests
+./build/core/tests/snes_tests                  # 111/111, 269572 assertions
+./build/tools/cputest/snes_cputest third_party/cputest/cputest-full.sfc   # SUCCESS 0081a2
+./build/tools/fase3/snes_fase3 build/tools/fase3/fase3_timing.sfc         # SUCCESS
+```
+
+## 13. Próxima fase (7)
+
+- **Fase 7 — Integración con juegos comerciales reales**: frontend (SDL2) +
+  input + save states + salida de audio (buffer del DSP), validación contra
+  juegos comerciales, y chips especiales (SA-1, SuperFX, DSP-1) — estos se
+  dejan fuera a propósito hasta esta fase.
 
 Pendientes menores documentados de fase 4 (no bloquean): PAL, líneas
 largas/cortas (341/342/340), refresh DRAM, sync de contadores en V=128, e
