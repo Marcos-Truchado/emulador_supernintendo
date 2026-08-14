@@ -107,11 +107,13 @@ class Apu : public Thread {
   int envRaw_[8] = {};     // unclamped envelope (two-slope GAIN detection)
   int16 outx_[8] = {};
   uint16 brrOffset_[8] = {};  // BRR sample address in RAM (DIR + srcn*4)
-  uint8 brrHeader_[8] = {};
-  uint8 brrShift_[8] = {};
-  uint8 brrFilter_[8] = {};
   uint8 brrNibble_[8] = {};  // 0..3 of the current BRR block
   int16 brrPrev_[8][2] = {};  // filter history (prev, prev2)
+  // gaussian interpolation state (ares dsp/gaussian.cpp + voice.cpp)
+  int16 gaussianBuffer_[8][12] = {};  // 12-entry ring buffer of decoded samples
+  int gaussianOffset_[8] = {};        // fractional position (0x4000 = 1 sample)
+  int bufferIndex_[8] = {};           // ring buffer write position
+  static int16 gaussianTable_[512];   // 512-entry gaussian interpolation table
 
   int16 sample_[2] = {};  // final L/R sample output (signed 16-bit)
 
@@ -140,6 +142,8 @@ class Apu : public Thread {
   void voiceKeyOn(int n);
   void decodeBrr(int n);        // decode one BRR sample for voice n
   void runEnvelope(int n);      // one envelope step (ADSR/gain)
+  void constructGaussianTable();  // build the gaussian interpolation table
+  auto gaussianInterpolate(int n) const -> int;
   void mixSample();             // sum 8 voices -> sample_[2]
   void pushSample();            // append sample_ to the audio ring buffer
   void tickTimers(int cycles);  // advance the three SMP timers by cycles

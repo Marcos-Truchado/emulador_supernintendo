@@ -55,6 +55,8 @@ TEST_CASE("apu: DSP BRR decode produces a non-zero sample after key-on") {
 
   apu.setDspRegister(0x5D, 0x00);  // DIR = 0
   apu.setDspRegister(0x04, 0x00);  // V0SRCN = 0
+  apu.setDspRegister(0x02, 0x00);  // V0PITCHL
+  apu.setDspRegister(0x03, 0x10);  // V0PITCHH -> pitch = 0x1000
   apu.setDspRegister(0x00, 0x7F);  // V0VOLL = 127
   apu.setDspRegister(0x01, 0x7F);  // V0VOLR = 127
   apu.setDspRegister(0x05, 0xDF);  // V0ADSR1: ADSR mode, attack rate 31
@@ -64,8 +66,9 @@ TEST_CASE("apu: DSP BRR decode produces a non-zero sample after key-on") {
   apu.setDspRegister(0x6C, 0x20);  // FLG: unmute
   apu.setDspRegister(0x4C, 0x01);  // KON voice 0
 
-  // 64 SMP cycles = 2 DSP samples; attack raises the envelope above zero.
-  for (int i = 0; i < 64; i++) apu.step(21);
+  // Run enough DSP samples for the BRR decode (every 4 samples at pitch
+  // 0x1000) and the attack to produce a non-zero output.
+  for (int i = 0; i < 256; i++) apu.step(21);
   CHECK(apu.sampleLeft() != 0);
 }
 

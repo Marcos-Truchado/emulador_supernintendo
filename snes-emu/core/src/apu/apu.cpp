@@ -1,6 +1,7 @@
 #include "apu/apu.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace snes {
 
@@ -11,6 +12,8 @@ const uint8 Apu::bootRom_[64] = {
     0xCB, 0xF4, 0xD7, 0x00, 0xFC, 0xD0, 0xF3, 0xAB, 0x01, 0x10, 0xEF, 0x7E, 0xF4, 0x10, 0xEB, 0xBA,
     0xF6, 0xDA, 0x00, 0xBA, 0xF4, 0xC4, 0xF4, 0xDD, 0x5D, 0xD0, 0xDB, 0x1F, 0x00, 0x00, 0xC0, 0xFF,
 };
+
+int16 Apu::gaussianTable_[512];
 
 // SPC700: 1.024MHz (24.576MHz / 24); one SMP cycle is ~20.97 master cycles.
 static constexpr uint64 kMasterPerSmpCycle = 21;
@@ -44,6 +47,7 @@ auto Apu::power() -> void {
   audioWr_ = audioRd_ = audioCount_ = 0;
   port_[0x01] = 0xB0;  // $F1: ROM enabled at $FFC0-$FFFF (power-on)
   dsp_[0x6C] = 0xE0;  // FLG: muted on reset (fullsnes)
+  constructGaussianTable();
   reset();
 }
 
@@ -568,49 +572,95 @@ void Apu::voiceKeyOn(int n) {
   brrOffset_[n] = uint16(readRam(dir + srcn * 4) | (readRam(dir + srcn * 4 + 1) << 8));
   brrNibble_[n] = 0;
   brrPrev_[n][0] = brrPrev_[n][1] = 0;
+  gaussianOffset_[n] = 0;
+  bufferIndex_[n] = 0;
   envx_[n] = 0;
   envRaw_[n] = 0;
   envMode_[n] = 0;  // attack
 }
 
-// Decode one BRR 4-bit nibble -> 15-bit sample (fullsnes "BRR Samples").
+// Build the 512-entry gaussian interpolation table (ares dsp/gaussian.cpp).
+void Apu::constructGaussianTable() {
+  double table[512];
+  constexpr double kPi = 3.14159265358979323846;
+  for (int n = 0; n < 512; n++) {
+    double k = 0.5 + n;
+    double s = std::sin(kPi * k * 1.280 / 1024);
+    double t = (std::cos(kPi * k * 2.000 / 1023) - 1) * 0.50;
+    double u = (std::cos(kPi * k * 4.000 / 1023) - 1) * 0.08;
+    double r = s * (t + u + 1.0) / k;
+    table[511 - n] = r;
+  }
+  for (int phase = 0; phase < 128; phase++) {
+    double sum = table[phase + 0] + table[phase + 256] + table[511 - phase] + table[255 - phase];
+    double scale = 2048.0 / sum;
+    gaussianTable_[phase + 0] = int16(table[phase + 0] * scale + 0.5);
+    gaussianTable_[phase + 256] = int16(table[phase + 256] * scale + 0.5);
+    gaussianTable_[511 - phase] = int16(table[511 - phase] * scale + 0.5);
+    gaussianTable_[255 - phase] = int16(table[255 - phase] * scale + 0.5);
+  }
+}
+
+// 4-tap gaussian interpolation over the ring buffer (ares dsp/gaussian.cpp).
+auto Apu::gaussianInterpolate(int n) const -> int {
+  int offset = (gaussianOffset_[n] >> 4) & 0xFF;
+  const int16* forward = gaussianTable_ + 255 - offset;
+  const int16* reverse = gaussianTable_ + offset;
+
+  int o = (bufferIndex_[n] + (gaussianOffset_[n] >> 12)) % 12;
+  int output;
+  output = forward[0] * gaussianBuffer_[n][o] >> 11; if (++o >= 12) o = 0;
+  output += forward[256] * gaussianBuffer_[n][o] >> 11; if (++o >= 12) o = 0;
+  output += reverse[256] * gaussianBuffer_[n][o] >> 11; if (++o >= 12) o = 0;
+  output = int16(output);
+  output += reverse[0] * gaussianBuffer_[n][o] >> 11;
+  return std::clamp(output, -0x8000, 0x7FFF) & ~1;
+}
+
+// Decode 4 BRR samples into the gaussian ring buffer (ares dsp/brr.cpp).
 void Apu::decodeBrr(int n) {
   const uint8 srcn = dsp_[n * 0x10 + 0x4];
   const uint16 dir = uint16(dsp_[0x5D]) << 8;
-  const uint16 offset = brrOffset_[n];
+  const uint16 block = brrOffset_[n];
 
-  if (brrNibble_[n] == 0) {  // new 9-byte block header
-    brrHeader_[n] = readRam(offset);
-    brrShift_[n] = brrHeader_[n] >> 4;
-    brrFilter_[n] = (brrHeader_[n] >> 2) & 3;
+  const uint8 header = readRam(block);
+  const int shift = header >> 4;
+  const int filter = (header >> 2) & 3;
+  const int loop = header & 3;
+
+  const int byteOff = 1 + (brrNibble_[n] >> 1);  // 1, 3, 5, 7
+  int nybbles = (readRam(block + byteOff) << 8) | readRam(block + byteOff + 1);
+
+  int16 p = brrPrev_[n][0], p2 = brrPrev_[n][1];
+
+  for (int i = 0; i < 4; i++) {
+    int s = int16(nybbles) >> 12;  // sign-extend the top nibble
+    nybbles <<= 4;
+    if (shift <= 12) { s <<= shift; s >>= 1; } else { s &= ~0x7FF; }
+    switch (filter) {
+      case 1: s += p + ((-p) >> 4); break;
+      case 2: s += (p << 1) + ((-3 * p) >> 5) - p2 + (p2 >> 4); break;
+      case 3: s += (p << 1) + ((-13 * p) >> 6) - p2 + ((3 * p2) >> 4); break;
+      default: break;
+    }
+    s = std::clamp(s, -0x8000, 0x7FFF);
+    gaussianBuffer_[n][bufferIndex_[n]] = int16(s << 1);
+    if (++bufferIndex_[n] >= 12) bufferIndex_[n] = 0;
+    p2 = p;
+    p = int16(s);
   }
-  const uint8 shift = brrShift_[n];
-  const uint8 data = readRam(offset + 1 + (brrNibble_[n] >> 1));
-  const int nib = (brrNibble_[n] & 1) ? (data >> 4) : (data & 0x0F);
-  const int sign = (nib ^ 8) - 8;
-  const int sample = shift <= 12 ? (sign << shift) >> 1 : sign & ~0x7FF;
+  brrPrev_[n][0] = p;
+  brrPrev_[n][1] = p2;
 
-  const int16 p = brrPrev_[n][0], p2 = brrPrev_[n][1];
-  int out;
-  switch (brrFilter_[n]) {
-    case 0: out = sample; break;
-    case 1: out = sample + p + ((-p) >> 4); break;
-    case 2: out = sample + (p << 1) + ((-3 * p) >> 5) - p2 + (p2 >> 4); break;
-    default: out = sample + (p << 1) + ((-13 * p) >> 6) - p2 + ((3 * p2) >> 4); break;
-  }
-  out = std::clamp(out, -0x4000, 0x3FFF);
-  brrPrev_[n][1] = brrPrev_[n][0];
-  brrPrev_[n][0] = int16(out);
-
-  if (++brrNibble_[n] >= 16) {  // block done
+  brrNibble_[n] += 4;
+  if (brrNibble_[n] >= 16) {  // block done
     brrNibble_[n] = 0;
-    const int loop = brrHeader_[n] & 3;
     if (loop == 1 || loop == 3) {  // end: jump to loop address, set ENDX
       brrOffset_[n] = uint16(readRam(dir + srcn * 4 + 2) | (readRam(dir + srcn * 4 + 3) << 8));
       dsp_[0x7C] |= uint8(1 << n);
       if (loop == 1) envx_[n] = 0;  // end+mute
     } else {
-      brrOffset_[n] = uint16(offset + 9);
+      brrOffset_[n] = uint16(block + 9);
     }
   }
 }
@@ -704,7 +754,15 @@ auto Apu::step(uint64 masterCycles) -> void {
     while (sampleClock_ >= kSmpCyclesPerSample) {
       sampleClock_ -= kSmpCyclesPerSample;
       counterTick();
-      for (int n = 0; n < 8; n++) { decodeBrr(n); runEnvelope(n); }
+      for (int n = 0; n < 8; n++) {
+        int output = gaussianInterpolate(n);
+        outx_[n] = int16((output * envx_[n] >> 11) & ~1);
+        runEnvelope(n);
+        const int pitch = (dsp_[n * 0x10 + 0x3] << 8) | dsp_[n * 0x10 + 0x2];
+        if (gaussianOffset_[n] >= 0x4000) decodeBrr(n);
+        gaussianOffset_[n] = (gaussianOffset_[n] & 0x3FFF) + pitch;
+        if (gaussianOffset_[n] > 0x7FFF) gaussianOffset_[n] = 0x7FFF;
+      }
       mixSample();
       pushSample();
     }
@@ -779,20 +837,23 @@ auto Apu::serialize(Writer& w) const -> void {
   w.u8(uint8(dspAddr_ & 0x7F));
   for (int n = 0; n < 8; n++) {
     w.u16(uint16(envx_[n] & 0xFFFF));
+    w.u8(envMode_[n]);
+    w.u16(uint16(envRaw_[n] & 0xFFFF));
     w.u16(uint16(outx_[n] & 0xFFFF));
     w.u16(brrOffset_[n]);
-    w.u8(brrHeader_[n]);
-    w.u8(brrShift_[n]);
-    w.u8(brrFilter_[n]);
     w.u8(brrNibble_[n]);
     w.u16(uint16(brrPrev_[n][0] & 0xFFFF));
     w.u16(uint16(brrPrev_[n][1] & 0xFFFF));
+    w.u16(uint16(gaussianOffset_[n] & 0xFFFF));
+    w.u8(uint8(bufferIndex_[n]));
+    for (int i = 0; i < 12; i++) w.u16(uint16(gaussianBuffer_[n][i] & 0xFFFF));
   }
   w.u16(uint16(sample_[0])); w.u16(uint16(sample_[1]));
   w.u32(uint32(counter_));
   w.u32(uint32(sampleClock_));
   w.u32(uint32(timerClock16_));
   w.u32(uint32(timerClock128_));
+  w.u32(uint32(clockCounter_));
 }
 
 auto Apu::deserialize(Reader& r) -> void {
@@ -810,14 +871,16 @@ auto Apu::deserialize(Reader& r) -> void {
   dspAddr_ = r.u8() & 0x7F;
   for (int n = 0; n < 8; n++) {
     envx_[n] = r.u16();
+    envMode_[n] = r.u8();
+    envRaw_[n] = int(r.u16());
     outx_[n] = int16(r.u16());
     brrOffset_[n] = r.u16();
-    brrHeader_[n] = r.u8();
-    brrShift_[n] = r.u8();
-    brrFilter_[n] = r.u8();
     brrNibble_[n] = r.u8();
     brrPrev_[n][0] = int16(r.u16());
     brrPrev_[n][1] = int16(r.u16());
+    gaussianOffset_[n] = int(r.u16());
+    bufferIndex_[n] = r.u8();
+    for (int i = 0; i < 12; i++) gaussianBuffer_[n][i] = int16(r.u16());
   }
   sample_[0] = int16(r.u16());
   sample_[1] = int16(r.u16());
@@ -825,6 +888,7 @@ auto Apu::deserialize(Reader& r) -> void {
   sampleClock_ = int(r.u32());
   timerClock16_ = int(r.u32());
   timerClock128_ = int(r.u32());
+  clockCounter_ = int(r.u32());
   // the audio ring buffer is not part of a save state; it refills as the
   // APU keeps running after load.
   audioWr_ = audioRd_ = audioCount_ = 0;
