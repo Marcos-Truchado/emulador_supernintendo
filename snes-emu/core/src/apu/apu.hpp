@@ -42,8 +42,8 @@ class Apu : public Thread {
   // readback for tests
   auto ram(uint16 address) const -> uint8;
   auto dspRegister(uint8 index) const -> uint8;
-  auto sampleLeft() const -> int8 { return sample_[0]; }
-  auto sampleRight() const -> int8 { return sample_[1]; }
+  auto sampleLeft() const -> int16 { return sample_[0]; }
+  auto sampleRight() const -> int16 { return sample_[1]; }
   // test-only setup helpers
   auto setRam(uint16 address, uint8 data) -> void { ram_[address] = data; }
   auto setDspRegister(uint8 index, uint8 data) -> void { dspWrite(index, data); }
@@ -53,6 +53,11 @@ class Apu : public Thread {
   auto setTimerDivider(int n, uint8 data) -> void { write(uint8(0xFA + n), data); }
   auto timerOut(int n) const -> uint8 { return timerOut_[n] & 0x0F; }
   auto pc() const -> uint16 { return pc_; }
+  auto aReg() const -> uint8 { return a_; }
+  auto xReg() const -> uint8 { return x_; }
+  auto yReg() const -> uint8 { return y_; }
+  auto spReg() const -> uint8 { return sp_; }
+  auto pswReg() const -> uint8 { return psw_; }
 
   // ---- audio output (phase 7) ----
   // Number of DSP samples (stereo int16, interleaved L/R) waiting in the
@@ -98,6 +103,8 @@ class Apu : public Thread {
   int dspAddr_ = 0;
   // per-voice runtime state (ENVX, OUTX, BRR decoder position)
   int envx_[8] = {};  // 11-bit envelope level (0..0x7FF)
+  uint8 envMode_[8] = {};  // 0=attack 1=decay 2=sustain 3=release
+  int envRaw_[8] = {};     // unclamped envelope (two-slope GAIN detection)
   int16 outx_[8] = {};
   uint16 brrOffset_[8] = {};  // BRR sample address in RAM (DIR + srcn*4)
   uint8 brrHeader_[8] = {};
@@ -106,7 +113,27 @@ class Apu : public Thread {
   uint8 brrNibble_[8] = {};  // 0..3 of the current BRR block
   int16 brrPrev_[8][2] = {};  // filter history (prev, prev2)
 
-  int8 sample_[2] = {};  // final L/R sample output (signed 8-bit)
+  int16 sample_[2] = {};  // final L/R sample output (signed 16-bit)
+
+  int clockCounter_ = 0;  // DSP envelope clock (0x7800-period down counter)
+
+  // DSP envelope counter rate/offset tables (fullsnes, ares).
+  static constexpr int kCounterRate[32] = {
+    0, 2048, 1536, 1280, 1024, 768, 640, 512, 384, 320, 256, 192, 160, 128, 96, 80,
+    64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2, 1,
+  };
+  static constexpr int kCounterOffset[32] = {
+    0, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536,
+    0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 0, 0,
+  };
+  void counterTick() {
+    if (!clockCounter_) clockCounter_ = 30720;
+    clockCounter_--;
+  }
+  bool counterPoll(int rate) const {
+    if (rate == 0) return false;
+    return (clockCounter_ + kCounterOffset[rate]) % kCounterRate[rate] == 0;
+  }
 
   auto dspRead(uint8 index) const -> uint8;
   void dspWrite(uint8 index, uint8 data);

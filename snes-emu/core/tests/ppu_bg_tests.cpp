@@ -95,7 +95,7 @@ TEST_CASE("ppu: mode 0 palette group, transparency, hmirror, vmirror") {
   f.ppu.writeRegister(0x0B, 0x02);
   f.ppu.writeRegister(0x2C, 0x01);
   f.vram(0x0000, 0x0400);  // (0,0): char 0, palette group 1 -> base 4
-  f.vram(0x2000, 0x0055);  // pixels 0,2,4,6 = 1, others 0
+  f.vram(0x2000, 0x00AA);  // pixels 0,2,4,6 = 1 (bit 7 = left-most), others 0
   f.vram(0x0001, 0x4001);  // (1,0): char 1, hmirror
   f.vram(0x2008, 0x0001);  // char 1 row 0: source pixel 0 colored
   f.vram(0x0002, 0x8002);  // (2,0): char 2, vmirror
@@ -132,7 +132,7 @@ TEST_CASE("ppu: mode 0 fine hscroll (write-twice) shifts the tile") {
   f.ppu.writeRegister(0x0B, 0x02);
   f.ppu.writeRegister(0x2C, 0x01);
   f.vram(0x0000, 0x0000);
-  f.vram(0x2000, 0x00F0);  // pixels 4-7 colored
+  f.vram(0x2000, 0x000F);  // pixels 4-7 colored (bit 7 = left-most)
   f.cgram(1, 0x7FFF);
   f.ppu.writeRegister(0x0D, 0x03);  // HOFS low
   f.ppu.writeRegister(0x0D, 0x00);  // HOFS high -> 3
@@ -392,9 +392,9 @@ TEST_CASE("ppu: mode 5 hires renders two half-pixels per dot") {
   f.ppu.writeRegister(0x2C, 0x01);
   f.ppu.writeRegister(0x2D, 0x01);  // hires: even half-pixels use the sub screen
   f.vram(0x0000, 0x0000);
-  f.vram(0x2000, 0xF00F);  // plane0 = 0x0F, plane1 = 0xF0 -> [1,1,1,1,2,2,2,2]
+  f.vram(0x2000, 0x0FF0);  // plane0 = 0xF0, plane1 = 0x0F -> [1,1,1,1,2,2,2,2]
   f.vram(0x2008, 0x0000);
-  f.vram(0x2100, 0xF00F);  // char 1: en hires el 2º half-tile del cell usa char+1
+  f.vram(0x2100, 0x0FF0);  // char 1: en hires el 2º half-tile del cell usa char+1
   f.vram(0x2108, 0x0000);
   f.cgram(1, 0x7FFF);
   f.cgram(2, 0x7C00);
@@ -482,11 +482,11 @@ TEST_CASE("ppu: mosaic repeats horizontal blocks and the block-top row") {
   f.ppu.writeRegister(0x0B, 0x02);
   f.ppu.writeRegister(0x2C, 0x01);
   f.vram(0x0000, 0x0000);
-  f.vram(0x2000, 0x1011);  // row 0: pixels 0 = 1, 4 = 3
+  f.vram(0x2000, 0x0888);  // row 0: pixels 0 = 1, 4 = 3 (bit 7 = left-most)
   f.vram(0x2001, 0x0000);  // rows 1-3 empty
   f.vram(0x2002, 0x0000);
   f.vram(0x2003, 0x0000);
-  f.vram(0x2004, 0x1100);  // row 4: pixels 0, 4 = 2
+  f.vram(0x2004, 0x8800);  // row 4: pixels 0, 4 = 2
   f.cgram(1, 0x7FFF);
   f.cgram(3, 0x7C00);
   f.cgram(2, 0x03E0);

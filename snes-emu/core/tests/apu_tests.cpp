@@ -36,7 +36,9 @@ TEST_CASE("apu: SPC700 executes a small program (ALU, branch, stack)") {
   apu.setRam(0xFFC7, 0xAE);
   apu.setRam(0xFFC8, 0xC4); apu.setRam(0xFFC9, 0x00);
   apu.reset();  // pc = 0xFFC0
-  for (int i = 0; i < 16; i++) apu.step(21);
+  // The 7-instruction program takes ~23 SMP cycles; run 40 SMP cycles of
+  // master-clock budget (40 * 21 master cycles) so it finishes.
+  for (int i = 0; i < 40; i++) apu.step(21);
   CHECK(apu.ram(0x0000) == 0x60);  // A survived push/xcn/pop as 0x60
 }
 
@@ -77,10 +79,11 @@ TEST_CASE("apu: SMP timers count (128-cycle clock) and disable clears output") {
   apu.setTimerDivider(0, 1);      // divide by 1: T0OUT++ on every 128-cycle tick
 
   CHECK(apu.timerOut(0) == 0);
-  // 32 BRA iterations * 4 cycles = 128 cycles = one timer-0 tick.
-  for (int i = 0; i < 32; i++) apu.step(21);
+  // 32 BRA iterations * 4 SMP cycles = 128 SMP cycles = one timer-0 tick.
+  // Each BRA consumes 4*21 master cycles, so step 84 master cycles per BRA.
+  for (int i = 0; i < 32; i++) apu.step(21 * 4);
   CHECK(apu.timerOut(0) == 1);
-  for (int i = 0; i < 32; i++) apu.step(21);
+  for (int i = 0; i < 32; i++) apu.step(21 * 4);
   CHECK(apu.timerOut(0) == 2);
 
   // Disabling the timer (CONTROL bit 0 = 0) resets the output to zero.
@@ -98,10 +101,10 @@ TEST_CASE("apu: SMP timer 2 runs on the 16-cycle (64kHz) clock") {
   apu.setTimerDivider(2, 1);      // divide by 1: T2OUT++ every 16-cycle tick
 
   CHECK(apu.timerOut(2) == 0);
-  // 4 BRA iterations * 4 cycles = 16 cycles = one timer-2 tick.
-  for (int i = 0; i < 4; i++) apu.step(21);
+  // 4 BRA iterations * 4 SMP cycles = 16 SMP cycles = one timer-2 tick.
+  for (int i = 0; i < 4; i++) apu.step(21 * 4);
   CHECK(apu.timerOut(2) == 1);
-  for (int i = 0; i < 4; i++) apu.step(21);
+  for (int i = 0; i < 4; i++) apu.step(21 * 4);
   CHECK(apu.timerOut(2) == 2);
 }
 
@@ -134,7 +137,7 @@ TEST_CASE("apu: SPC700 CALL/RET returns to the correct address") {
   apu.setRam(0x0500, 0xE8); apu.setRam(0x0501, 0x56);
   apu.setRam(0x0502, 0x6F);
   apu.reset();  // pc = 0xFFC0
-  for (int i = 0; i < 16; i++) apu.step(21);
+  for (int i = 0; i < 40; i++) apu.step(21);
   CHECK(apu.ram(0x0000) == 0x56);  // A=$56 survived the CALL/RET round-trip
 }
 
@@ -151,6 +154,42 @@ TEST_CASE("apu: SPC700 ALU memory forms (dp,#imm and (X),(Y))") {
   apu.reset();
   for (int i = 0; i < 16; i++) apu.step(21);
   CHECK(apu.ram(0x0000) == 0x4B);
+}
+
+TEST_CASE("apu: CONTROL $F1 bit4/5 reset the CPU->SMP input latches") {
+  Apu apu;
+  apu.power();
+  apu.writePort(0, 0x12);
+  apu.writePort(1, 0x34);
+  apu.writePort(2, 0x56);
+  apu.writePort(3, 0x78);
+  CHECK(apu.inputPort(0) == 0x12);
+  apu.setControl(0x10);  // bit4: reset $F4/$F5 input latches
+  CHECK(apu.inputPort(0) == 0x00);
+  CHECK(apu.inputPort(1) == 0x00);
+  CHECK(apu.inputPort(2) == 0x56);  // bit5 untouched
+  CHECK(apu.inputPort(3) == 0x78);
+  apu.setControl(0x20);  // bit5: reset $F6/$F7 input latches
+  CHECK(apu.inputPort(2) == 0x00);
+  CHECK(apu.inputPort(3) == 0x00);
+}
+
+TEST_CASE("apu: SPC700 1-bit ops decode the bit select correctly") {
+  Apu apu;
+  apu.power();
+  apu.setControl(0x00);  // RAM mode
+  // CLRC / MOV1 C,$0010.5 / BCC +4 / MOV A,#$56 / MOV $00,A
+  // With bit5 decoded correctly, C=1 so BCC is not taken and A=$56 is stored.
+  // With the old "bit always 0" bug, C=0 so BCC skips the store and $00 stays 0.
+  apu.setRam(0xFFC0, 0x60);                                  // CLRC
+  apu.setRam(0xFFC1, 0xAA); apu.setRam(0xFFC2, 0x10); apu.setRam(0xFFC3, 0xA0);  // MOV1 C,$0010.5
+  apu.setRam(0xFFC4, 0x90); apu.setRam(0xFFC5, 0x04);        // BCC +4
+  apu.setRam(0xFFC6, 0xE8); apu.setRam(0xFFC7, 0x56);        // MOV A,#$56
+  apu.setRam(0xFFC8, 0xC4); apu.setRam(0xFFC9, 0x00);        // MOV $00,A
+  apu.setRam(0x0010, 0x20);  // bit 5 set (bit 0 clear)
+  apu.reset();
+  for (int i = 0; i < 16; i++) apu.step(21);
+  CHECK(apu.ram(0x0000) == 0x56);  // bit 5 read as 1 -> C=1 -> store taken
 }
 
 TEST_CASE("apu: SPC700 CMP X,#imm sets Z and branches correctly") {

@@ -8,6 +8,16 @@ static bool ppuDebug() {
   return on;
 }
 
+// Reverse the 8 bits of a byte (bit 0<->7, 1<->6, ...). The BG/OBJ character
+// data stores bit 7 as the left-most pixel (fullsnes), while the plane
+// extraction below places the input's bit 0 first.
+static std::uint8_t reverseBits8(std::uint8_t x) {
+  x = std::uint8_t((x & 0xF0) >> 4 | (x & 0x0F) << 4);
+  x = std::uint8_t((x & 0xCC) >> 2 | (x & 0x33) << 2);
+  x = std::uint8_t((x & 0xAA) >> 1 | (x & 0x55) << 1);
+  return x;
+}
+
 namespace snes {
 
 // ---- Layer ----
@@ -122,8 +132,9 @@ repeat:
 
   // Palette groups: mode 0 packs 4 colors per group (shift 2); 8bpp mode 3
   // packs 256 (shift 8); the remaining 4bpp modes pack 16 (shift 4).
+  // The shift follows this layer's bpp (kBpp2/kBpp4/kBpp8), not the BG mode.
   uint32 paletteOffset = ppu.io_.mode == 0 ? id << 5 : 0;
-  uint32 paletteSize = ppu.io_.mode == 0 ? 2 : ppu.io_.mode == 3 ? 8 : 4;
+  uint32 paletteSize = 2 << mode;
   tile.palette = paletteOffset + (tile.paletteGroup << paletteSize);
 
   if (ppuDebug())
@@ -176,9 +187,20 @@ auto Ppu::Layer::loadPlanes(uint32 index, bool half) -> void {
   if (ppuDebug())
     printf("char L=%u lid=%u dot=%u charIdx=%u addr=%04X word=%04X\n", ppu.scanline(), id, ppu.dot(), characterIndex, tile.address + (index << 3), data);
 
+  // The character data stores bit 7 as the left-most pixel. The plane
+  // extraction below places the input byte's bit 0 first, so reverse each
+  // byte. A horizontally-mirrored tile is drawn in the opposite order, so
+  // skip the reversal for those (bit 0 becomes the left-most pixel).
+  uint8 lo = uint8(data & 0xFF);
+  uint8 hi = uint8(data >> 8);
+  if (!tile.hmirror) {
+    lo = reverseBits8(lo);
+    hi = reverseBits8(hi);
+  }
+
   tile.data[index] = (
-      ((((data & 0xFF) * 0x0101010101010101ull & 0x8040201008040201ull) * 0x0102040810204081ull) >> 49) & 0x5555
-    | ((((data >> 8) * 0x0101010101010101ull & 0x8040201008040201ull) * 0x0102040810204081ull) >> 48) & 0xAAAA
+      ((((lo * 0x0101010101010101ull & 0x8040201008040201ull) * 0x0102040810204081ull) >> 49) & 0x5555)
+    | ((((hi * 0x0101010101010101ull & 0x8040201008040201ull) * 0x0102040810204081ull) >> 48) & 0xAAAA)
   );
 }
 

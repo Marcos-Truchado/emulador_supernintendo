@@ -25,6 +25,8 @@ auto Apu::power() -> void {
   std::fill(std::begin(port_), std::end(port_), 0);
   std::fill(std::begin(dsp_), std::end(dsp_), 0);
   std::fill(std::begin(envx_), std::end(envx_), 0);
+  std::fill(std::begin(envMode_), std::end(envMode_), 0);
+  std::fill(std::begin(envRaw_), std::end(envRaw_), 0);
   std::fill(std::begin(outx_), std::end(outx_), 0);
   std::fill(std::begin(brrOffset_), std::end(brrOffset_), 0);
   std::fill(std::begin(brrNibble_), std::end(brrNibble_), 0);
@@ -38,6 +40,7 @@ auto Apu::power() -> void {
   sampleClock_ = 0;
   timerClock16_ = 0;
   timerClock128_ = 0;
+  clockCounter_ = 0;
   audioWr_ = audioRd_ = audioCount_ = 0;
   port_[0x01] = 0xB0;  // $F1: ROM enabled at $FFC0-$FFFF (power-on)
   dsp_[0x6C] = 0xE0;  // FLG: muted on reset (fullsnes)
@@ -78,8 +81,10 @@ void Apu::write(uint16 addr, uint8 data) {
   if (addr >= 0xF0 && addr < 0x0100) {
     switch (addr) {
       case 0xF4: case 0xF5: case 0xF6: case 0xF7: break;  // CPUIO out (below)
-      case 0xF1:  // CONTROL: bit 7 selects ROM/RAM at $FFC0-$FFFF
-        if (!(data & 0x80)) std::copy(std::begin(bootRom_), std::end(bootRom_), ram_ + 0xFFC0);
+      case 0xF1:  // CONTROL (fullsnes): bit7 ROM at $FFC0-$FFFF, bits 0-2 timers
+        // Bits 4/5 reset the CPU->SMP input latches ($F4/$F5 and $F6/$F7).
+        if (data & 0x10) { apuIn_[0] = 0; apuIn_[1] = 0; }
+        if (data & 0x20) { apuIn_[2] = 0; apuIn_[3] = 0; }
         // bits 0-2 enable the three timers; disabling resets TnOUT + reload.
         for (int n = 0; n < 3; n++) {
           if (!(data & (1 << n))) { timerOut_[n] = 0; timerCounter_[n] = 0; }
@@ -375,9 +380,12 @@ auto Apu::stepInstruction() -> int {
   }
   switch (op) {
     case 0xEA: case 0xCA: case 0xAA: case 0x0A: case 0x2A: case 0x4A: case 0x6A: case 0x8A: {
-      const uint16 a = uint16(readOp()) | (uint16(readOp() & 0x1F) << 8);  // 13-bit
-      const int bit = a >> 13;
-      const uint16 addr = a & 0x1FFF;
+      // 1-bit ops encode a 13-bit address + 3-bit bit select in two bytes:
+      // byte1 = addr low, byte2 = (bit << 5) | (addr >> 8).
+      const uint8 lo = readOp();
+      const uint8 hi = readOp();
+      const uint16 addr = uint16(lo) | (uint16(hi & 0x1F) << 8);
+      const int bit = hi >> 5;
       const bool b = read(addr) & (1 << bit);
       int cyc = 4;
       if (op == 0xEA) { write(addr, uint8(read(addr) ^ (1 << bit))); cyc = 5; }  // NOT1
@@ -541,9 +549,12 @@ void Apu::dspWrite(uint8 index, uint8 data) {
     case 0x4C:  // KON: key-on voices (edge-triggered)
       for (int n = 0; n < 8; n++) if (data & (1 << n)) voiceKeyOn(n);
       break;
-    case 0x5C: dsp_[0x5C] = data; break;  // KOFF
+    case 0x5C:  // KOFF: key off -> release
+      dsp_[0x5C] = data;
+      for (int n = 0; n < 8; n++) if (data & (1 << n)) envMode_[n] = 3;
+      break;
     case 0x6C:  // FLG
-      if (data & 0x80) for (int n = 0; n < 8; n++) envx_[n] = 0;  // soft reset
+      if (data & 0x80) for (int n = 0; n < 8; n++) { envMode_[n] = 3; envx_[n] = 0; }  // soft reset
       dsp_[0x6C] = data;
       break;
     case 0x7C: dsp_[0x7C] = 0; break;  // ENDX: any write acks all bits
@@ -558,6 +569,8 @@ void Apu::voiceKeyOn(int n) {
   brrNibble_[n] = 0;
   brrPrev_[n][0] = brrPrev_[n][1] = 0;
   envx_[n] = 0;
+  envRaw_[n] = 0;
+  envMode_[n] = 0;  // attack
 }
 
 // Decode one BRR 4-bit nibble -> 15-bit sample (fullsnes "BRR Samples").
@@ -571,10 +584,11 @@ void Apu::decodeBrr(int n) {
     brrShift_[n] = brrHeader_[n] >> 4;
     brrFilter_[n] = (brrHeader_[n] >> 2) & 3;
   }
-  const uint8 shift = brrShift_[n] < 13 ? brrShift_[n] : 12;
+  const uint8 shift = brrShift_[n];
   const uint8 data = readRam(offset + 1 + (brrNibble_[n] >> 1));
   const int nib = (brrNibble_[n] & 1) ? (data >> 4) : (data & 0x0F);
-  const int sample = ((nib ^ 8) - 8) << shift >> 1;  // (nibble SHL shift) SAR 1
+  const int sign = (nib ^ 8) - 8;
+  const int sample = shift <= 12 ? (sign << shift) >> 1 : sign & ~0x7FF;
 
   const int16 p = brrPrev_[n][0], p2 = brrPrev_[n][1];
   int out;
@@ -601,24 +615,65 @@ void Apu::decodeBrr(int n) {
   }
 }
 
-// ADSR/gain envelope step (simplified; see ponytail note).
+// ADSR/gain envelope step (ares dsp/envelope.cpp).
 void Apu::runEnvelope(int n) {
-  const bool adsr = dsp_[n * 0x10 + 0x5] & 0x80;
-  if (adsr) {
-    const uint8 adsr1 = dsp_[n * 0x10 + 0x5];
-    const uint8 adsr2 = dsp_[n * 0x10 + 0x6];
-    if (envx_[n] < 0x7E0) {  // attack
-      envx_[n] += (adsr1 & 0x0F) == 15 ? 1024 : 32;
-      if (envx_[n] > 0x7E0) envx_[n] = 0x7E0;
-    } else {  // sustain (decay skipped)
-      const int boundary = (((adsr2 >> 5) & 7) + 1) * 0x100;
-      const int rate = adsr2 & 0x1F;
-      if (rate && envx_[n] > boundary) envx_[n] -= ((envx_[n] - 1) >> 8) + 1;
-    }
-    envx_[n] = std::clamp(envx_[n], 0, 0x7FF);
-  } else {
-    envx_[n] = std::clamp((dsp_[n * 0x10 + 0x7] & 0x7F) << 4, 0, 0x7FF);  // direct gain
+  int envelope = envx_[n];
+
+  if (envMode_[n] == 3) {  // release
+    envelope -= 0x8;
+    if (envelope < 0) envelope = 0;
+    envx_[n] = envelope;
+    return;
   }
+
+  int rate;
+  int envelopeData;
+  if (dsp_[n * 0x10 + 0x5] & 0x80) {  // ADSR
+    envelopeData = dsp_[n * 0x10 + 0x6];  // adsr2: sustain level/rate
+    if (envMode_[n] >= 1) {  // decay / sustain
+      envelope--;
+      envelope -= envelope >> 8;
+      rate = envelopeData & 0x1F;
+      if (envMode_[n] == 1) {  // decay
+        rate = ((dsp_[n * 0x10 + 0x5] >> 4) & 7) * 2 + 16;
+      }
+    } else {  // attack
+      rate = (dsp_[n * 0x10 + 0x5] & 0x0F) * 2 + 1;
+      envelope += rate < 31 ? 0x20 : 0x400;
+    }
+  } else {  // GAIN
+    envelopeData = dsp_[n * 0x10 + 0x7];
+    int mode = envelopeData >> 5;
+    if (mode < 4) {  // direct
+      envelope = envelopeData << 4;
+      rate = 31;
+    } else {
+      rate = envelopeData & 0x1F;
+      if (mode == 4) {
+        envelope -= 0x20;
+      } else if (mode < 6) {
+        envelope--;
+        envelope -= envelope >> 8;
+      } else {
+        envelope += 0x20;
+        if (mode > 6 && uint32(envRaw_[n]) >= 0x600) {
+          envelope += 0x8 - 0x20;
+        }
+      }
+    }
+  }
+
+  if ((envelope >> 8) == (envelopeData >> 5) && envMode_[n] == 1) {
+    envMode_[n] = 2;  // decay -> sustain
+  }
+  envRaw_[n] = envelope;
+
+  if (uint32(envelope) > 0x7FF) {
+    envelope = (envelope < 0 ? 0 : 0x7FF);
+    if (envMode_[n] == 0) envMode_[n] = 1;  // attack -> decay
+  }
+
+  if (counterPoll(rate)) envx_[n] = envelope;
 }
 
 void Apu::mixSample() {
@@ -632,8 +687,8 @@ void Apu::mixSample() {
   left = (left * int8(dsp_[0x0C])) >> 7;    // MVOLL
   right = (right * int8(dsp_[0x1C])) >> 7;  // MVOLR
   if (dsp_[0x6C] & 0x40) left = right = 0;  // mute
-  sample_[0] = int8(std::clamp(left >> 8, -128, 127));
-  sample_[1] = int8(std::clamp(right >> 8, -128, 127));
+  sample_[0] = int16(std::clamp(left, -32768, 32767));
+  sample_[1] = int16(std::clamp(right, -32768, 32767));
 }
 
 // ---- Thread ----
@@ -641,13 +696,14 @@ void Apu::mixSample() {
 auto Apu::step(uint64 masterCycles) -> void {
   counter_ += int(masterCycles);
   while (counter_ >= int(kMasterPerSmpCycle)) {
-    counter_ -= int(kMasterPerSmpCycle);
     const int cycles = stepInstruction();
     if (cycles == 0) return;  // SLEEP/STOP: halt
+    counter_ -= cycles * int(kMasterPerSmpCycle);
     tickTimers(cycles);
     sampleClock_ += cycles;
     while (sampleClock_ >= kSmpCyclesPerSample) {
       sampleClock_ -= kSmpCyclesPerSample;
+      counterTick();
       for (int n = 0; n < 8; n++) { decodeBrr(n); runEnvelope(n); }
       mixSample();
       pushSample();
@@ -689,9 +745,9 @@ void Apu::tickTimer(int n) {
 
 void Apu::pushSample() {
   if (audioCount_ + 2 > kAudioBuf) return;  // full: drop (shouldn't happen)
-  audioBuf_[audioWr_] = int16(sample_[0]) << 8;
+  audioBuf_[audioWr_] = sample_[0];
   audioWr_ = (audioWr_ + 1) % kAudioBuf;
-  audioBuf_[audioWr_] = int16(sample_[1]) << 8;
+  audioBuf_[audioWr_] = sample_[1];
   audioWr_ = (audioWr_ + 1) % kAudioBuf;
   audioCount_ += 2;
 }
@@ -732,7 +788,7 @@ auto Apu::serialize(Writer& w) const -> void {
     w.u16(uint16(brrPrev_[n][0] & 0xFFFF));
     w.u16(uint16(brrPrev_[n][1] & 0xFFFF));
   }
-  w.u8(uint8(sample_[0])); w.u8(uint8(sample_[1]));
+  w.u16(uint16(sample_[0])); w.u16(uint16(sample_[1]));
   w.u32(uint32(counter_));
   w.u32(uint32(sampleClock_));
   w.u32(uint32(timerClock16_));
@@ -763,8 +819,8 @@ auto Apu::deserialize(Reader& r) -> void {
     brrPrev_[n][0] = int16(r.u16());
     brrPrev_[n][1] = int16(r.u16());
   }
-  sample_[0] = int8(r.u8());
-  sample_[1] = int8(r.u8());
+  sample_[0] = int16(r.u16());
+  sample_[1] = int16(r.u16());
   counter_ = int(r.u32());
   sampleClock_ = int(r.u32());
   timerClock16_ = int(r.u32());
