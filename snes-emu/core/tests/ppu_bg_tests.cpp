@@ -269,11 +269,11 @@ TEST_CASE("ppu: mode 2 offset-per-tile (hlookup one-column lag, vlookup)") {
   f.vram(0x1001, 0x0000);
   f.vram(0x13E2, 0x0000);
   f.vram(0x1002, 0x0000);
-  // 4bpp tiles: char c at 0x2000 + 32c, rows at c*32+r for planes 0-1 and
-  // c*32+8+r for planes 2-3.
+  // 4bpp tiles: char c at 0x2000 + 16c, rows at c*16+r for planes 0-1 and
+  // c*16+8+r for planes 2-3 (4bpp stride = 16 words).
   for (int c = 0; c <= 4; c++) {
-    f.vram(0x2000 + 32 * c, 0x00FF);
-    f.vram(0x2008 + 32 * c, 0x0000);
+    f.vram(0x2000 + 16 * c, 0x00FF);
+    f.vram(0x2008 + 16 * c, 0x0000);
   }
   f.cgram(1, 0x7FFF);   // char 0
   f.cgram(17, 0x03E0);  // char 1
@@ -332,9 +332,9 @@ TEST_CASE("ppu: mode 4 8bpp BG1 renders 256-color tiles at stride 128") {
   f.ppu.writeRegister(0x2C, 0x01);  // TM: BG1
   f.vram(0x0000, 0x0000);  // (0,0): char 0
   f.vram(0x0001, 0x0001);  // (1,0): char 1
-  // 8bpp chars: char c at 0x2000 + 128*c (mode 4 stride = 1 << (3+4)).
+  // 8bpp chars: char c at 0x2000 + 32*c (stride = 1 << (3+2) = 32 words).
   f.tile8(0x2000, 0x8F);  // char 0 -> color 0x8F
-  f.tile8(0x2080, 0x11);  // char 1 -> color 0x11
+  f.tile8(0x2020, 0x11);  // char 1 -> color 0x11
   f.cgram(0x8F, 0x001F);
   f.cgram(0x11, 0x7C00);
   f.show();
@@ -363,9 +363,9 @@ TEST_CASE("ppu: mode 4 offset-per-tile horizontal (bit 15=0, one-column lag)") {
   f.vram(0x13E1, 0x2008);  // col 1: hoffset 8 -> applied one column late
   f.vram(0x13E2, 0x0000);  // col 2: no offset
   f.tile8(0x2000, 0x11);  // char 0
-  f.tile8(0x2080, 0x22);  // char 1
-  f.tile8(0x2100, 0x33);  // char 2
-  f.tile8(0x2180, 0x44);  // char 3
+  f.tile8(0x2020, 0x22);  // char 1
+  f.tile8(0x2040, 0x33);  // char 2
+  f.tile8(0x2060, 0x44);  // char 3
   f.cgram(0x11, 0x7FFF);
   f.cgram(0x22, 0x03E0);
   f.cgram(0x33, 0x7C00);
@@ -394,8 +394,8 @@ TEST_CASE("ppu: mode 5 hires renders two half-pixels per dot") {
   f.vram(0x0000, 0x0000);
   f.vram(0x2000, 0x0FF0);  // plane0 = 0xF0, plane1 = 0x0F -> [1,1,1,1,2,2,2,2]
   f.vram(0x2008, 0x0000);
-  f.vram(0x2100, 0x0FF0);  // char 1: en hires el 2º half-tile del cell usa char+1
-  f.vram(0x2108, 0x0000);
+  f.vram(0x2010, 0x0FF0);  // char 1 (4bpp stride 16): en hires el 2º half-tile usa char+1
+  f.vram(0x2018, 0x0000);
   f.cgram(1, 0x7FFF);
   f.cgram(2, 0x7C00);
   f.show();
@@ -437,8 +437,8 @@ TEST_CASE("ppu: mode 6 hires with offset-per-tile at 16 half-pixel columns") {
     f.vram(0x13E0 + c, 0x0000);  // H row: no horizontal offsets
   }
   for (int c = 0; c <= 2; c++) {
-    f.vram(0x2000 + 0x200 * c, 0x00FF);
-    f.vram(0x2008 + 0x200 * c, 0x0000);
+    f.vram(0x2000 + 16 * c, 0x00FF);
+    f.vram(0x2008 + 16 * c, 0x0000);
   }
   f.cgram(1, 0x7FFF);
   f.cgram(17, 0x03E0);

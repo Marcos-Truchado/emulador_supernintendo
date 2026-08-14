@@ -123,12 +123,14 @@ repeat:
   if (htiles == 4 && bool(hoffset & 8) != tile.hmirror) tile.character += 1;
   if (vtiles == 4 && bool(voffset & 8) != tile.vmirror) tile.character += 16;
 
-  uint32 characterMask = kVramMask >> (3 + ppu.io_.mode);
-  uint32 characterIndex = tileBase >> (3 + ppu.io_.mode);
+  // Tile stride in VRAM words follows this layer's bpp (kBpp2=8 words,
+  // kBpp4=16, kBpp8=32), not the BG screen mode (ares uses io.mode here).
+  uint32 characterMask = kVramMask >> (3 + mode);
+  uint32 characterIndex = tileBase >> (3 + mode);
   uint16 origin = (tile.character + characterIndex) & characterMask;
 
   if (tile.vmirror) voffset ^= 7;
-  tile.address = (origin << (3 + ppu.io_.mode)) + (voffset & 7);
+  tile.address = (origin << (3 + mode)) + (voffset & 7);
 
   // Palette groups: mode 0 packs 4 colors per group (shift 2); 8bpp mode 3
   // packs 256 (shift 8); the remaining 4bpp modes pack 16 (shift 4).
