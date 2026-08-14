@@ -669,11 +669,10 @@ auto Ppu::Composer::pickSub(bool hires) -> uint16 {
   if ((transparent = priority == 0)) below.color = lookupColor(0);
 
   if (!hires) return 0;
-  // Hires even half-pixels = sub screen: without color math the below pick
-  // passes through unchanged (ares dac.cpp pixel(): `if(!io.colorEnable[above.source]) return above.color`).
-  if (!below.colorEnable) return below.color;
-  if (!blendMode) return mixColors(below.color, coldataColor());
-  return mixColors(below.color, above.color);
+  // Hires even half-pixels = sub screen. Matches ares dac.cpp below(): gate
+  // below.color with above.colorEnable, and use the per-dot mathBlendMode.
+  if (!below.colorEnable) return above.colorEnable ? below.color : uint16(0);
+  return mixColors(above.colorEnable ? below.color : 0, mathBlendMode ? above.color : coldataColor());
 }
 
 auto Ppu::Composer::pickMain() -> uint16 {

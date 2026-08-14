@@ -101,7 +101,7 @@ auto System::renderedFrames() const -> uint64 { return ppu_->renderedFrames(); }
 auto System::saveState() -> std::vector<uint8> {
   Writer w;
   w.u32(0x53534E53);  // "SNSS"
-  w.u32(1);           // version
+  w.u32(2);           // version (bumped: APU serialization layout changed)
   scheduler_->serialize(w);
   cpu_->serialize(w);
   ppu_->serialize(w);
@@ -113,7 +113,7 @@ auto System::saveState() -> std::vector<uint8> {
 auto System::loadState(const std::vector<uint8>& data) -> bool {
   Reader r(data);
   if (r.u32() != 0x53534E53) return false;
-  if (r.u32() != 1) return false;
+  if (r.u32() != 2) return false;
   scheduler_->deserialize(r);
   cpu_->deserialize(r);
   ppu_->deserialize(r);

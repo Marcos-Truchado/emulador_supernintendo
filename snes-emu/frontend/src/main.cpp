@@ -146,7 +146,8 @@ auto main(int argc, char** argv) -> int {
     for (int y = 0; y < kHeight; y++) {
       for (int x = 0; x < kWidth; x++) {
         const snes::uint16 v = system.pixelColor(x, y);
-        const snes::uint8 r = snes::uint8((v >> 10) & 0x1F), g = snes::uint8((v >> 5) & 0x1F), b = snes::uint8(v & 0x1F);
+        // RGB555: 0bbbbbgggggrrrrr (red bits 0-4, green 5-9, blue 10-14).
+        const snes::uint8 r = snes::uint8(v & 0x1F), g = snes::uint8((v >> 5) & 0x1F), b = snes::uint8((v >> 10) & 0x1F);
         snes::uint8* p = &rgb[(size_t(y) * kWidth + x) * 3];
         p[0] = snes::uint8((r << 3) | (r >> 2));
         p[1] = snes::uint8((g << 3) | (g >> 2));

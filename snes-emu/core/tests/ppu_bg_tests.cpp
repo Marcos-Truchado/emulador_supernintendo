@@ -401,8 +401,10 @@ TEST_CASE("ppu: mode 5 hires renders two half-pixels per dot") {
   f.show();
 
   f.paint(1, 0);
-  // Line 1 row 9: half-pixel pair of dot 0: below then above = tile pixel 0.
-  CHECK(f.raw(1, 26 + 0) == (0x8000 | 0x7FFF));
+  // Line 1 row 9: half-pixel pair of dot 0: below then above. The first sub
+  // half-pixel reads the previous dot's colorEnable (ares one-dot delay) so
+  // it is transparent; the main half-pixel is tile pixel 0.
+  CHECK(f.raw(1, 26 + 0) == 0x8000);
   CHECK(f.raw(1, 26 + 1) == (0x8000 | 0x7FFF));
   f.paint(1, 4);
   // Dot 2 renders tile pixels 4-5: half-pixels 4..7.
@@ -444,8 +446,9 @@ TEST_CASE("ppu: mode 6 hires with offset-per-tile at 16 half-pixel columns") {
   f.show();
 
   f.paint(1, 16);
-  // One-column lag again: cols -> [0, 1, 2] in 16 half-pixels.
-  CHECK(f.raw(1, 26 + 0) == (0x8000 | 0x7FFF));
+  // One-column lag again: cols -> [0, 1, 2] in 16 half-pixels. The first sub
+  // half-pixel is transparent (ares one-dot delay on colorEnable).
+  CHECK(f.raw(1, 26 + 0) == 0x8000);
   CHECK(f.raw(1, 26 + 16) == (0x8000 | 0x03E0));
   CHECK(f.raw(1, 26 + 32) == (0x8000 | 0x7C00));
 }
@@ -470,7 +473,8 @@ TEST_CASE("ppu: pseudoHires renders main/sub as half-pixel pairs") {
 
   f.paint(1, 0);
   // Even half-pixel = sub screen (BG2 red), odd half-pixel = main (BG1 white).
-  CHECK(f.raw(1, 26 + 0) == (0x8000 | 0x001F));
+  // The first sub half-pixel is transparent (ares one-dot delay on colorEnable).
+  CHECK(f.raw(1, 26 + 0) == 0x8000);
   CHECK(f.raw(1, 26 + 1) == (0x8000 | 0x7FFF));
 }
 

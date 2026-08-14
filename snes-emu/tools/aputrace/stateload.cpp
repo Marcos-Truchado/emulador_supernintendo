@@ -58,15 +58,20 @@ int main(int argc, char** argv) {
       for (int x = 0; x < 256; x++) {
         snes::uint16 v = system.pixelColor(x, y);
         uint8_t rgb[3] = {
-          uint8_t(((v >> 10) & 0x1F) << 3 | ((v >> 10) & 0x1F) >> 2),
-          uint8_t(((v >> 5) & 0x1F) << 3 | ((v >> 5) & 0x1F) >> 2),
           uint8_t((v & 0x1F) << 3 | (v & 0x1F) >> 2),
+          uint8_t(((v >> 5) & 0x1F) << 3 | ((v >> 5) & 0x1F) >> 2),
+          uint8_t(((v >> 10) & 0x1F) << 3 | ((v >> 10) & 0x1F) >> 2),
         };
         std::fwrite(rgb, 1, 3, ppm);
       }
     std::fclose(ppm);
     printf("wrote state.ppm\n");
   }
+  // Run forward 60 frames to get past any fade/transition.
+  int frames = getenv("RUN_FRAMES") ? std::atoi(getenv("RUN_FRAMES")) : 0;
+  uint64_t target = system.renderedFrames() + frames;
+  while (system.renderedFrames() < target) system.step();
+
   auto& ppu = system.ppu();
   printf("ppu mode=%d\n", ppu.bgMode());
   for (int bg = 0; bg < 4; bg++)

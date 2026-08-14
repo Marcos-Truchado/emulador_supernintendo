@@ -201,7 +201,7 @@ auto main(int argc, char** argv) -> int {
     for (int y = 0; y < h; y++) {
       for (int x = 0; x < w; x++) {
         snes::uint16 v = system.pixelColor(x, y);
-        int r = (v >> 10) & 0x1F, g = (v >> 5) & 0x1F, b = v & 0x1F;
+        int r = v & 0x1F, g = (v >> 5) & 0x1F, b = (v >> 10) & 0x1F;
         uint8_t rgb[3] = {
           uint8_t((r << 3) | (r >> 2)),
           uint8_t((g << 3) | (g >> 2)),
