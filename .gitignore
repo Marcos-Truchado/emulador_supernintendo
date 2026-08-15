@@ -1,0 +1,8 @@
+# ROMs de juegos (material con copyright) — no subir a GitHub
+juegos/
+
+# Estados guardados del emulador
+*.ss
+
+# macOS
+.DS_Store

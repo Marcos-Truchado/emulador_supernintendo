@@ -59,12 +59,6 @@ auto Bus::read(uint24 address) -> uint8 {
   if (bank == 0x7E) return latch(wram_[offs]);
   if (bank == 0x7F) return latch(wram_[0x10000 + offs]);
 
-  // HiROM only: $3E-3F/$BE-BF mirror the full 128KB WRAM.
-  if (cartridge_.mapMode() == MapMode::hirom &&
-      (bank == 0x3E || bank == 0x3F || bank == 0xBE || bank == 0xBF)) {
-    return latch(wram_[(bank & 1) * 0x10000 + offs]);
-  }
-
   // System banks 00-3F / 80-BF.
   if (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF)) {
     if (offs < 0x2000) return latch(wram_[offs]);
@@ -120,11 +114,6 @@ void Bus::write(uint24 address, uint8 data) {
 
   if (bank == 0x7E) return void(wram_[offs] = data);
   if (bank == 0x7F) return void(wram_[0x10000 + offs] = data);
-
-  if (cartridge_.mapMode() == MapMode::hirom &&
-      (bank == 0x3E || bank == 0x3F || bank == 0xBE || bank == 0xBF)) {
-    return void(wram_[(bank & 1) * 0x10000 + offs] = data);
-  }
 
   if (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF)) {
     if (offs < 0x2000) return void(wram_[offs] = data);

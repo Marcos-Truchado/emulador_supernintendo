@@ -66,8 +66,8 @@ auto Apu::read(uint16 addr) -> uint8 {
   if (addr >= 0xFFC0 && (port_[1] & 0x80)) return bootRom_[addr & 0x3F];
   if (addr >= 0xF0 && addr < 0x0100) {
     switch (addr) {
-      case 0xF2: return uint8(dspAddr_);  // DSPADDR
-      case 0xF3: return dspRead(uint8(dspAddr_));  // DSPDATA
+      case 0xF2: return uint8(dspAddr_ & 0xFF);  // DSPADDR (full 8-bit)
+      case 0xF3: return dspRead(uint8(dspAddr_));  // DSPDATA (masks to 7-bit)
       case 0xF4: case 0xF5: case 0xF6: case 0xF7: return apuIn_[addr - 0xF4];  // CPUIO in
       case 0xFD: case 0xFE: case 0xFF: {  // TnOUT (reset on read)
         const uint8 v = timerOut_[addr - 0xFD] & 0x0F;
@@ -94,7 +94,7 @@ void Apu::write(uint16 addr, uint8 data) {
           if (!(data & (1 << n))) { timerOut_[n] = 0; timerCounter_[n] = 0; }
         }
         break;
-      case 0xF2: dspAddr_ = data & 0x7F; break;
+      case 0xF2: dspAddr_ = data; break;  // DSPADDR: keep full 8-bit (bit 7 = read-only mirror)
       case 0xF3: dspWrite(uint8(dspAddr_), data); break;
       case 0xFA: case 0xFB: case 0xFC:  // TnDIV: set divider + reload counter
         timerDivider_[addr - 0xFA] = data;
@@ -862,7 +862,7 @@ auto Apu::serialize(Writer& w) const -> void {
   w.u8(a_); w.u8(x_); w.u8(y_); w.u8(sp_); w.u8(psw_);
   w.u16(pc_);
   w.raw(dsp_, sizeof(dsp_));
-  w.u8(uint8(dspAddr_ & 0x7F));
+  w.u8(uint8(dspAddr_));
   for (int n = 0; n < 8; n++) {
     w.u16(uint16(envx_[n] & 0xFFFF));
     w.u8(envMode_[n]);
@@ -896,7 +896,7 @@ auto Apu::deserialize(Reader& r) -> void {
   a_ = r.u8(); x_ = r.u8(); y_ = r.u8(); sp_ = r.u8(); psw_ = r.u8();
   pc_ = r.u16();
   r.raw(dsp_, sizeof(dsp_));
-  dspAddr_ = r.u8() & 0x7F;
+  dspAddr_ = r.u8();
   for (int n = 0; n < 8; n++) {
     envx_[n] = r.u16();
     envMode_[n] = r.u8();

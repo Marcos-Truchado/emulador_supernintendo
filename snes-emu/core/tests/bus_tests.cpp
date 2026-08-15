@@ -75,15 +75,16 @@ TEST_CASE("bus: HiROM routing (ROM windows, WRAM mirrors, SRAM)") {
   // System banks mirror 40-7D at +$8000.
   CHECK(bus.read(0x008000) == 0xEA);
   CHECK(bus.read(0x808000) == 0xEA);
-  // 3E-3F/BE-BF mirror the full 128KB WRAM.
+  // 8KB WRAM mirror at $0000-1FFF (banks 00-3F/80-BF, fullsnes System Area).
   bus.write(0x3E0000, 0x33);
   CHECK(bus.read(0x3E0000) == 0x33);
   CHECK(bus.read(0x7E0000) == 0x33);
-  bus.write(0x3F8000, 0x44);
-  CHECK(bus.read(0x3F8000) == 0x44);
-  CHECK(bus.read(0x7F8000) == 0x44);
   bus.write(0xBE0000, 0x55);
   CHECK(bus.read(0x7E0000) == 0x55);
+  // Banks 3E-3F/BE-BF at $8000-FFFF are ROM mirrors, not WRAM.
+  bus.write(0x3F8000, 0x44);
+  CHECK(bus.read(0x3F8000) == 0xEA);
+  CHECK(bus.read(0xBE8000) == 0xEA);
 
   // SRAM at 20-3F/A0-BF:6000-7FFF.
   bus.write(0x206000, 0x42);
