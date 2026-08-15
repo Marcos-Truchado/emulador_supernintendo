@@ -15,7 +15,7 @@ static snes::Cartridge makeCart(snes::MapMode mode, size_t size, snes::uint8 sra
                                                       : 0x7FD5;
   rom[hdr] = mode == snes::MapMode::lorom     ? 0x20
              : mode == snes::MapMode::hirom   ? 0x21
-             : mode == snes::MapMode::exhirom ? 0x22
+             : mode == snes::MapMode::exhirom ? 0x25
                                               : 0x20;
   rom[hdr + 3] = sramExp;  // RAM-size byte ($FFD8 family)
 

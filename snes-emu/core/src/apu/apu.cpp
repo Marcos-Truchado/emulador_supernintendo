@@ -151,7 +151,13 @@ auto Apu::stepInstruction() -> int {
     case 0xEB: y_ = readDp(readOp()); setNZ(y_); return 3;               // MOV Y,dp
     case 0xFB: y_ = readDp(uint8(readOp() + x_)); setNZ(y_); return 4;   // MOV Y,dp+X
     case 0xEC: y_ = read(readAbs()); setNZ(y_); return 4;                // MOV Y,!abs
-    case 0xBA: { const uint16 v = read16Dp(readOp()); setYa(v); setNZ(y_); return 5; }  // MOVW YA,dp
+    case 0xBA: {  // MOVW YA,dp
+      const uint16 v = read16Dp(readOp());
+      setYa(v);
+      setFlag(kZ, v == 0);
+      setFlag(kN, (v & 0x8000) != 0);
+      return 5;
+    }
 
     case 0x8F: { const uint8 v = readOp(); writeDp(readOp(), v); return 5; }             // MOV dp,#imm
     case 0xFA: { const uint8 a = readOp(); const uint8 b = readOp(); writeDp(b, readDp(a)); return 5; }  // MOV dp,dp
@@ -325,13 +331,18 @@ auto Apu::stepInstruction() -> int {
     case 0xFC: y_++; setNZ(y_); return 2;   // INC Y
 
     // ---- 16-bit ALU ----
+    // Note: N/Z are set from the FULL 16-bit result (fullsnes "N.....ZC"),
+    // not just the high byte.
     case 0x7A: {  // ADDW YA,dp
       const uint16 w = read16Dp(readOp());
       const int r = ya() + w;
       setFlag(kC, r > 0xFFFF);
       setFlag(kH, ((ya() & 0xFFF) + (w & 0xFFF)) > 0xFFF);
       setFlag(kV, ((ya() ^ w) & 0x8000) == 0 && ((ya() ^ r) & 0x8000) != 0);
-      setYa(uint16(r)); setNZ(y_); return 5;
+      setYa(uint16(r));
+      setFlag(kZ, (r & 0xFFFF) == 0);
+      setFlag(kN, (r & 0x8000) != 0);
+      return 5;
     }
     case 0x9A: {  // SUBW YA,dp
       const uint16 w = read16Dp(readOp());
@@ -339,31 +350,48 @@ auto Apu::stepInstruction() -> int {
       setFlag(kC, r >= 0);
       setFlag(kH, ((ya() & 0xFFF) - (w & 0xFFF)) >= 0);
       setFlag(kV, ((ya() ^ w) & 0x8000) != 0 && ((ya() ^ r) & 0x8000) != 0);
-      setYa(uint16(r)); setNZ(y_); return 5;
+      setYa(uint16(r));
+      setFlag(kZ, (r & 0xFFFF) == 0);
+      setFlag(kN, (r & 0x8000) != 0);
+      return 5;
     }
     case 0x5A: {  // CMPW YA,dp
       const uint16 w = read16Dp(readOp());
       const int r = ya() - w;
-      setFlag(kC, r >= 0); setNZ(uint8(r >> 8)); return 4;
+      setFlag(kC, r >= 0);
+      setFlag(kZ, (r & 0xFFFF) == 0);
+      setFlag(kN, (r & 0x8000) != 0);
+      return 4;
     }
     case 0x3A: {  // INCW dp
       const uint8 a = readOp();
       const uint16 v = read16Dp(a) + 1;
       writeDp(a, uint8(v & 0xFF)); writeDp(uint8(a + 1), uint8(v >> 8));
-      setNZ(uint8(v >> 8)); return 6;
+      setFlag(kZ, v == 0);
+      setFlag(kN, (v & 0x8000) != 0);
+      return 6;
     }
     case 0x1A: {  // DECW dp
       const uint8 a = readOp();
       const uint16 v = read16Dp(a) - 1;
       writeDp(a, uint8(v & 0xFF)); writeDp(uint8(a + 1), uint8(v >> 8));
-      setNZ(uint8(v >> 8)); return 6;
+      setFlag(kZ, v == 0);
+      setFlag(kN, (v & 0x8000) != 0);
+      return 6;
     }
     case 0x9E: {  // DIV YA,X
+      // ares: half-carry compares the low nibbles; overflow (Y >= X*2) takes
+      // the odd hardware path rather than truncating the quotient.
       const uint16 t = ya();
-      const int d = x_ ? x_ : 256;  // div-by-zero guard (undefined on hardware)
-      setFlag(kV, y_ >= x_);
-      setFlag(kH, (t / d) >= 0x100);
-      a_ = uint8(t / d); y_ = uint8(t % d);
+      const int X = x_;
+      setFlag(kH, (y_ & 0x0F) >= (X & 0x0F));
+      setFlag(kV, y_ >= X);
+      if (X == 0) { a_ = 0xFF; y_ = 0xFF; }
+      else if (y_ < (X << 1)) { a_ = uint8(t / X); y_ = uint8(t % X); }
+      else {
+        a_ = uint8(255 - (t - (X << 9)) / (256 - X));
+        y_ = uint8(X + (t - (X << 9)) % (256 - X));
+      }
       setNZ(a_); return 12;
     }
     case 0xCF: {  // MUL YA

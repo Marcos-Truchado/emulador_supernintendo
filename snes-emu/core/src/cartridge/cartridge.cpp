@@ -7,12 +7,13 @@ namespace snes {
 // 512-byte copier header: a file with one is N*32KB + 512 bytes.
 static bool isCopierHeader(uint64 size) { return (size % 0x8000) == 512; }
 
-// Header map-mode byte ($7FD5 / $FFD5); bit layout 00ssmmmm:
-//   bits 7-6 ignored, bit5 = speed (0=SlowROM, 1=FastROM),
-//   bits 4-0 map mode (0=LoROM, 1=HiROM, 2=ExHiROM, ...).
-static bool isLoRomFamily(uint8 b) { return (b & 0x1F) == 0x00; }
-static bool isHiRomFamily(uint8 b) { return (b & 0x1F) == 0x01; }
-static bool isExHiRomFamily(uint8 b) { return (b & 0x1F) == 0x02; }
+// Header map-mode byte ($7FD5 / $FFD5); per fullsnes "ROM Speed and Map Mode":
+//   bits 7-6 always 0, bit5 always 1, bit4 = speed (0=Slow, 1=Fast),
+//   bits 3-0 map mode (0=LoROM, 1=HiROM, 2=LoROM+S-DD1, 3=LoROM+SA-1,
+//   5=ExHiROM, A=HiROM+SPC7110). Only the low nibble selects the map family.
+static bool isLoRomFamily(uint8 b) { return (b & 0x0F) == 0x00; }
+static bool isHiRomFamily(uint8 b) { return (b & 0x0F) == 0x01; }
+static bool isExHiRomFamily(uint8 b) { return (b & 0x0F) == 0x05; }
 
 // Raw-image file offset of the given 24-bit address for a map mode, before the
 // copier header is stripped. Returns the 32-bit max (as the "unmapped" marker)
@@ -33,14 +34,19 @@ static uint32 offsetInFile(MapMode mode, uint24 address) {
       return -1;
     case MapMode::hirom:
       if (bank == 0x7E || bank == 0x7F) return -1;
-      // $00-3F/$80-BF:8000-FFFF -> mirrors of $40-7D:0000-7FFF.
-      if (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF))
-        return 0x400000 + ((bank & 0x3F) << 16) + (address & 0x7FFF);
+      // $00-3F/$80-BF:8000-FFFF mirror the upper halves of the $40-7D/$C0-FF
+      // banks (fullsnes "Plain HiROM": ROM at 40-7d,c0-ff:0000-ffff, ROM
+      // mirrors at 00-3f,80-bf:8000-ffff). The lower halves of the system
+      // banks are WRAM/I/O, not ROM.
+      if (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF)) {
+        if (offs < 0x8000) return -1;
+        return ((bank & 0x3F) << 16) + offs;
+      }
       // $40-7D:0000-FFFF -> full 64KB windows; $C0-FF mirrors them.
       if (bank >= 0x40 && bank <= 0x7D)
         return ((bank & 0x3F) << 16) + offs;
       if (bank >= 0xC0)
-        return (((bank - 0x40) & 0x3F) << 16) + offs;
+        return ((bank & 0x3F) << 16) + offs;
       return -1;
     case MapMode::exhirom:
       // $40-7D:0000-FFFF -> first 4MB; $C0-FF -> next 4MB; system banks

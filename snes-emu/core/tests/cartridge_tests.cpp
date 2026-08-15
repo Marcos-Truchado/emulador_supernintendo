@@ -110,19 +110,52 @@ TEST_CASE("cartridge: HiROM mapping") {
   CHECK(cart.romOffset(0x400000) == 0x000000);
   CHECK(cart.romOffset(0x408000) == 0x008000);
   CHECK(cart.romOffset(0x7DFFFF) == 0x3DFFFF);
-  // System banks mirror 40-7D at +$8000.
-  CHECK(cart.romOffset(0x008000) == 0x400000);
-  CHECK(cart.romOffset(0x018000) == 0x410000);
-  CHECK(cart.romOffset(0x808000) == 0x400000);
+  // System banks mirror the upper halves of 40-7D / C0-FF.
+  CHECK(cart.romOffset(0x008000) == 0x008000);
+  CHECK(cart.romOffset(0x018000) == 0x018000);
+  CHECK(cart.romOffset(0x808000) == 0x008000);
+  CHECK(cart.romOffset(0x00FFFC) == 0x00FFFC);  // reset vector
+  // The lower halves of the system banks are WRAM/I/O, not ROM.
+  CHECK(cart.romOffset(0x000000) == 0xFFFFFFFF);
+  CHECK(cart.romOffset(0x007FFF) == 0xFFFFFFFF);
   // C0-FF mirror 40-7D.
   CHECK(cart.romOffset(0xC00000) == 0x000000);
   CHECK(cart.romOffset(0xFF0000) == 0x3F0000);
 }
 
+TEST_CASE("cartridge: FastROM map mode detection (bit 4 = speed)") {
+  // The map mode lives in bits 3-0; bit 4 is the FastROM speed flag and must
+  // not affect detection. $30 = Fast LoROM, $31 = Fast HiROM (e.g. DKC3).
+  {
+    std::vector<snes::uint8> rom(0x40000, 0xEA);
+    rom[0x7FD5] = 0x30;  // FastROM LoROM
+    snes::Cartridge cart;
+    std::string error;
+    REQUIRE(cart.load(std::move(rom), &error));
+    CHECK(cart.mapMode() == snes::MapMode::lorom);
+  }
+  {
+    std::vector<snes::uint8> rom(0x400000, 0xEA);
+    rom[0xFFD5] = 0x31;  // FastROM HiROM
+    snes::Cartridge cart;
+    std::string error;
+    REQUIRE(cart.load(std::move(rom), &error));
+    CHECK(cart.mapMode() == snes::MapMode::hirom);
+  }
+  {
+    std::vector<snes::uint8> rom(0x600000, 0xEA);
+    rom[0x40FFD5] = 0x35;  // FastROM ExHiROM
+    snes::Cartridge cart;
+    std::string error;
+    REQUIRE(cart.load(std::move(rom), &error));
+    CHECK(cart.mapMode() == snes::MapMode::exhirom);
+  }
+}
+
 TEST_CASE("cartridge: ExHiROM mapping") {
   // 6MB ExHiROM: 40-7D cover the first 4MB, C0-FF the last 2MB.
   std::vector<snes::uint8> rom(0x600000, 0xEA);
-  rom[0x40FFD5] = 0x22;
+  rom[0x40FFD5] = 0x25;
 
   snes::Cartridge cart;
   std::string error;
@@ -168,7 +201,7 @@ TEST_CASE("cartridge: SRAM size from header byte") {
   }
   {
     std::vector<snes::uint8> rom(0x600000, 0xEA);
-    rom[0x40FFD5] = 0x22;
+    rom[0x40FFD5] = 0x25;
     rom[0x40FFD8] = 0x05;  // 32KB (ExHiROM header at $40FFD8)
     snes::Cartridge cart;
     std::string error;
