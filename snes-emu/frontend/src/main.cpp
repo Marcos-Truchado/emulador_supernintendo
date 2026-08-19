@@ -21,6 +21,7 @@
 
 #include "snes/snes.hpp"
 
+#include "controller.hpp"
 #include "font.hpp"
 
 namespace {
@@ -163,13 +164,17 @@ void drawLogo(SDL_Renderer* renderer, int cx, int cy) {
 
 // Draw the centered launcher frame and return the selected game path, or an
 // empty string when the user quit.
-auto launcher(SDL_Renderer* renderer, SDL_Window* window) -> std::string {
+auto launcher(SDL_Renderer* renderer, SDL_Window* window, Gamepad& gamepad) -> std::string {
   const std::vector<GameEntry> games = listGames(kGamesDir);
 
   bool running = true;
   std::string selected;
+  int sel = 0;               // highlighted row (mouse/controller navigation)
+  snes::uint16 prevDir = 0;  // previous direction bits (edge detection)
+  uint64_t lastDir = 0;      // last selection move (auto-repeat while held)
 
   while (running) {
+    gamepad.poll();
     int winW = 0, winH = 0;
     SDL_GetWindowSize(window, &winW, &winH);
 
@@ -181,6 +186,7 @@ auto launcher(SDL_Renderer* renderer, SDL_Window* window) -> std::string {
       if (ev.type == SDL_QUIT) { running = false; break; }
       if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) { running = false; break; }
       if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_F11) toggleFullscreen(window);
+      gamepad.handleEvent(ev);
       if (ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_LEFT) {
         // Game list hit-testing (rows are recomputed below).
         const int listX = winW * 62 / 100;
@@ -189,6 +195,7 @@ auto launcher(SDL_Renderer* renderer, SDL_Window* window) -> std::string {
         for (size_t i = 0; i < games.size(); i++) {
           SDL_Rect r{listX, listY + int(i) * rowH, winW - listX - 40, rowH};
           if (mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h) {
+            sel = int(i);
             selected = games[i].path;
             running = false;
             break;
@@ -196,6 +203,22 @@ auto launcher(SDL_Renderer* renderer, SDL_Window* window) -> std::string {
         }
       }
     }
+
+    // Controller navigation: D-pad / left stick, with auto-repeat while held.
+    snes::uint16 dir = 0;
+    if (!games.empty()) {
+      dir = gamepad.direction();
+      auto repeat = [&](snes::uint16 bit) {
+        if (!(dir & bit)) return false;
+        if (!(prevDir & bit)) return true;               // fresh press
+        return SDL_GetTicks64() - lastDir >= 250;        // held: auto-repeat
+      };
+      if (repeat(kUp)) { sel = int((sel + games.size() - 1) % games.size()); lastDir = SDL_GetTicks64(); }
+      if (repeat(kDown)) { sel = int((sel + 1) % games.size()); lastDir = SDL_GetTicks64(); }
+      if (gamepad.pressed(SDL_CONTROLLER_BUTTON_B)) { selected = games[sel].path; running = false; }  // SNES A (right) launches
+      if (gamepad.pressed(SDL_CONTROLLER_BUTTON_A)) { running = false; break; }  // SNES B (bottom) quits, like ESC
+    }
+    prevDir = dir;
 
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
@@ -241,8 +264,7 @@ auto launcher(SDL_Renderer* renderer, SDL_Window* window) -> std::string {
     const int rowH = 30;
     for (size_t i = 0; i < games.size(); i++) {
       SDL_Rect r{listX, 170 + int(i) * rowH, winW - listX - 40, rowH};
-      const bool hover = (mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h);
-      const RGB c = hover ? kYellow : kGreen;
+      const RGB c = (int(i) == sel) ? kYellow : kGreen;
       SDL_Texture* t = renderText(renderer, games[i].name, c.r, c.g, c.b, 2);
       if (t) {
         int w = 0, h = 0;
@@ -253,25 +275,36 @@ auto launcher(SDL_Renderer* renderer, SDL_Window* window) -> std::string {
       }
     }
 
-    // Hint.
+    // Hints.
     {
-      SDL_Texture* t = renderText(renderer, "Flechas/WASD mover - X/Space A - Z/Q B - Enter Start",
+      SDL_Texture* t = renderText(renderer, "Teclado: flechas/WASD - X/Space A - Z/Q B - Enter Start - Shift/E Select",
                                   kWhite.r, kWhite.g, kWhite.b, 1);
       if (t) {
         int w = 0, h = 0;
         SDL_QueryTexture(t, nullptr, nullptr, &w, &h);
-        SDL_Rect dst{winW / 2 - w / 2, winH - 46, w, h};
+        SDL_Rect dst{winW / 2 - w / 2, winH - 48, w, h};
         SDL_RenderCopy(renderer, t, nullptr, &dst);
         SDL_DestroyTexture(t);
       }
     }
     {
-      SDL_Texture* t = renderText(renderer, "Shift/E Select - V X - C Y - U L - I R - F5 guardar - F8 cargar",
+      SDL_Texture* t = renderText(renderer, "Mando Xbox: A derecha, B abajo, Y izq, X arriba (posicion SNES) - LB L - RB R - Menu Start - Ver Select - mover D-pad/stick - derecha lanzar - abajo salir",
                                   kWhite.r, kWhite.g, kWhite.b, 1);
       if (t) {
         int w = 0, h = 0;
         SDL_QueryTexture(t, nullptr, nullptr, &w, &h);
-        SDL_Rect dst{winW / 2 - w / 2, winH - 28, w, h};
+        SDL_Rect dst{winW / 2 - w / 2, winH - 32, w, h};
+        SDL_RenderCopy(renderer, t, nullptr, &dst);
+        SDL_DestroyTexture(t);
+      }
+    }
+    {
+      SDL_Texture* t = renderText(renderer, "En juego: V X - C Y - U L - I R - F5/F8 guardar/cargar - Mando: Ver+RB guardar - Ver+LB cargar - Ver+Menu volver",
+                                  kWhite.r, kWhite.g, kWhite.b, 1);
+      if (t) {
+        int w = 0, h = 0;
+        SDL_QueryTexture(t, nullptr, nullptr, &w, &h);
+        SDL_Rect dst{winW / 2 - w / 2, winH - 16, w, h};
         SDL_RenderCopy(renderer, t, nullptr, &dst);
         SDL_DestroyTexture(t);
       }
@@ -284,9 +317,10 @@ auto launcher(SDL_Renderer* renderer, SDL_Window* window) -> std::string {
   return selected;
 }
 
-// Run one ROM. Returns true to go back to the launcher (ESC), false to quit.
+// Run one ROM. Returns true to go back to the launcher (ESC or
+// Select+Start), false to quit.
 auto runGame(const std::string& romPath, SDL_Renderer* renderer, SDL_Window* window,
-             SDL_AudioDeviceID audio) -> bool {
+             SDL_AudioDeviceID audio, Gamepad& gamepad) -> bool {
   snes::System system;
   std::string error;
   if (!system.load(romPath, &error)) {
@@ -319,10 +353,12 @@ auto runGame(const std::string& romPath, SDL_Renderer* renderer, SDL_Window* win
 
   while (running) {
     const uint64_t frameStart = SDL_GetTicks64();
+    gamepad.poll();
 
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
       if (ev.type == SDL_QUIT) return false;
+      gamepad.handleEvent(ev);
       if (ev.type == SDL_KEYDOWN) {
         switch (ev.key.keysym.sym) {
           case SDLK_ESCAPE: return true;  // back to launcher
@@ -334,8 +370,16 @@ auto runGame(const std::string& romPath, SDL_Renderer* renderer, SDL_Window* win
       }
     }
 
+    // Controller shortcuts (Select/View held + shoulder/start).
+    if (gamepad.pressed(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) && gamepad.held(SDL_CONTROLLER_BUTTON_BACK))
+      saveStateFile(system, statePath);
+    if (gamepad.pressed(SDL_CONTROLLER_BUTTON_LEFTSHOULDER) && gamepad.held(SDL_CONTROLLER_BUTTON_BACK))
+      loadStateFile(system, statePath);
+    if (gamepad.pressed(SDL_CONTROLLER_BUTTON_START) && gamepad.held(SDL_CONTROLLER_BUTTON_BACK))
+      return true;  // back to launcher
+
     SDL_PumpEvents();
-    system.setJoypad(0, readJoypad(SDL_GetKeyboardState(nullptr)));
+    system.setJoypad(0, readJoypad(SDL_GetKeyboardState(nullptr)) | gamepad.joypad());
     runFrame();
 
     for (int y = 0; y < kHeight; y++) {
@@ -386,10 +430,12 @@ auto main(int argc, char** argv) -> int {
   std::string romPath;
   if (argc >= 2) romPath = argv[1];
 
-  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
+  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
     std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
     return 1;
   }
+
+  Gamepad gamepad;
 
   SDL_Window* window = SDL_CreateWindow("emulador supernintendo", SDL_WINDOWPOS_CENTERED,
                                         SDL_WINDOWPOS_CENTERED, kWidth * kScale,
@@ -413,15 +459,15 @@ auto main(int argc, char** argv) -> int {
   int rc = 0;
 
   if (!romPath.empty()) {
-    // Direct play: run the given ROM; ESC quits.
-    runGame(romPath, renderer, window, audio);
+    // Direct play: run the given ROM; ESC or Select+Start quits.
+    runGame(romPath, renderer, window, audio, gamepad);
   } else {
     // Launcher loop: pick a game, run it, return on ESC.
     bool quit = false;
     while (!quit) {
-      std::string game = launcher(renderer, window);
+      std::string game = launcher(renderer, window, gamepad);
       if (game.empty()) { quit = true; break; }
-      if (!runGame(game, renderer, window, audio)) quit = true;
+      if (!runGame(game, renderer, window, audio, gamepad)) quit = true;
     }
   }
 
