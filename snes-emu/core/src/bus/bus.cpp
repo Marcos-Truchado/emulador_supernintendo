@@ -226,14 +226,14 @@ uint8 Bus::mmioRead(uint24 address) {
       case 0x4217: return latch(mathResult_ >> 8);
       // $4218-$421F auto-read joypad registers (16-bit button state per
       // controller: low byte A/X/L/R, high byte B/Y/Sel/Start/D-pad).
-      case 0x4218: return latch(joypad_[0] & 0xFF);
-      case 0x4219: return latch(joypad_[0] >> 8);
-      case 0x421A: return latch(joypad_[1] & 0xFF);
-      case 0x421B: return latch(joypad_[1] >> 8);
-      case 0x421C: return latch(joypad_[2] & 0xFF);
-      case 0x421D: return latch(joypad_[2] >> 8);
-      case 0x421E: return latch(joypad_[3] & 0xFF);
-      case 0x421F: return latch(joypad_[3] >> 8);
+      case 0x4218: return latch(joypadLatched_[0] & 0xFF);
+      case 0x4219: return latch(joypadLatched_[0] >> 8);
+      case 0x421A: return latch(joypadLatched_[1] & 0xFF);
+      case 0x421B: return latch(joypadLatched_[1] >> 8);
+      case 0x421C: return latch(joypadLatched_[2] & 0xFF);
+      case 0x421D: return latch(joypadLatched_[2] >> 8);
+      case 0x421E: return latch(joypadLatched_[3] & 0xFF);
+      case 0x421F: return latch(joypadLatched_[3] >> 8);
     }
   }
   if (offs < 0x4300) return lastData_;  // $4220-$42FF unused
@@ -546,6 +546,7 @@ void Bus::power() {
   std::fill(std::begin(cpuReg_), std::end(cpuReg_), 0);
   std::fill(std::begin(dmaReg_), std::end(dmaReg_), 0xFF);
   std::fill(std::begin(joypad_), std::end(joypad_), 0);
+  std::fill(std::begin(joypadLatched_), std::end(joypadLatched_), 0);
   std::fill(std::begin(joypadShift_), std::end(joypadShift_), 0);
   joypadStrobe_ = false;
 
@@ -581,6 +582,15 @@ uint32 Bus::wramAddress() const { return wramAddr_; }
 auto Bus::setJoypad(int port, uint16 buttons) -> void {
   if (port < 0 || port >= 4) return;
   joypad_[port] = buttons;
+}
+
+auto Bus::latchJoypads() -> void {
+  // $4218-$421F use the same 16-bit button masks as the public joypad API:
+  // A=0x0080, Start=0x1000, B=0x8000. The manual $4016 reader shifts this
+  // same mask MSB-first; auto-read does not use a second bit layout.
+  for (int p = 0; p < 4; p++) {
+    joypadLatched_[p] = joypad_[p];
+  }
 }
 
 // ---- save states ----

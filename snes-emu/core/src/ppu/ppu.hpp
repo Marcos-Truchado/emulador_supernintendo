@@ -41,7 +41,8 @@ namespace snes {
 //
 // Framebuffer: 564 x 242 NTSC. Row 0..239 map to visible lines; the +26
 // column offset reproduces the horizontal border of the video signal, and
-// non-overscan frames are shifted down 8 rows (dac line addressing). Every
+// non-overscan frames are shifted down 8 rows (dac line addressing; the
+// visible picture = scanlines 1..224, matching snes9x). Every
 // entry is 16-bit: bit15 = display-brightness flag, bits 14-0 = RGB555.
 //
 // Out of scope (documented in update.md): PAL, long/short scanlines, DRAM
@@ -87,6 +88,12 @@ class Ppu : public Thread {
   auto setFrameStartSink(std::function<void()> sink) -> void { frameStartSink_ = std::move(sink); }
   auto setHblankSink(std::function<void()> sink) -> void { hblankSink_ = std::move(sink); }
 
+  // Auto-joypad-read sink (fullsnes "AUTO JOYPAD READ"): fired once per
+  // frame at the moment the read window opens, so the bus can latch the
+  // live controller state into $4218-$421F for the rest of the frame.
+  auto setAutoJoySink(std::function<void()> sink) -> void { autoJoySink_ = std::move(sink); }
+  auto autoJoyBusy() const -> bool { return autoJoyBusy_; }  // live $4212 bit0
+
   // ---- counters / flags (tests, runner, later phases) ----
   auto dot() const -> uint16 { return dot_; }            // H counter 0..340
   auto scanline() const -> uint16 { return scanline_; }  // V counter 0..261
@@ -129,6 +136,47 @@ class Ppu : public Thread {
   auto bgTileBase(int bg) const -> uint16 { return layers_[bg].tileBase; }
   auto bgHScroll(int bg) const -> uint16 { return layers_[bg].hscroll; }
   auto bgVScroll(int bg) const -> uint16 { return layers_[bg].vscroll; }
+  auto debugBrightness() const -> uint8 { return io_.displayBrightness; }
+  auto debugDisabled() const -> bool { return io_.displayDisable; }
+  struct M7Regs { uint16 a, b, c, d; };
+  auto debugM7() const -> M7Regs { return {io_.m7a, io_.m7b, io_.m7c, io_.m7d}; }
+  auto debugM7Hofs() const -> uint16 { return io_.hoffsetMode7; }
+  auto debugM7Vofs() const -> uint16 { return io_.voffsetMode7; }
+  auto debugCgramAddr() const -> uint8 { return io_.cgramAddr; }
+  auto debugVramAddr() const -> uint16 { return io_.vramAddr; }
+  auto debugVramInc() const -> uint8 { return io_.vramIncrementSize; }
+  auto debugOamBase() const -> uint16 { return io_.oamBaseAddr; }
+  struct WindowRegs {
+    uint8 oneLeft = 0, oneRight = 0, twoLeft = 0, twoRight = 0;
+    uint8 bg1 = 0, bg2 = 0, bg3 = 0, bg4 = 0, obj = 0, col = 0;
+    uint8 bg1en = 0, bg2en = 0, bg3en = 0, bg4en = 0, objen = 0;
+  };
+  auto debugWindows() const -> WindowRegs {
+    WindowRegs w;
+    w.oneLeft = window_.oneLeft; w.oneRight = window_.oneRight;
+    w.twoLeft = window_.twoLeft; w.twoRight = window_.twoRight;
+    w.bg1 = window_.bg1.mask | window_.bg1.oneInvert | window_.bg1.oneEnable << 1 |
+            window_.bg1.twoInvert << 2 | window_.bg1.twoEnable << 3;
+    w.bg2 = window_.bg2.mask | window_.bg2.oneInvert | window_.bg2.oneEnable << 1 |
+            window_.bg2.twoInvert << 2 | window_.bg2.twoEnable << 3;
+    w.bg3 = window_.bg3.mask | window_.bg3.oneInvert | window_.bg3.oneEnable << 1 |
+            window_.bg3.twoInvert << 2 | window_.bg3.twoEnable << 3;
+    w.bg4 = window_.bg4.mask | window_.bg4.oneInvert | window_.bg4.oneEnable << 1 |
+            window_.bg4.twoInvert << 2 | window_.bg4.twoEnable << 3;
+    w.obj = window_.obj.mask | window_.obj.oneInvert | window_.obj.oneEnable << 1 |
+            window_.obj.twoInvert << 2 | window_.obj.twoEnable << 3;
+    w.col = window_.col.mask | window_.col.oneInvert | window_.col.oneEnable << 1 |
+            window_.col.twoInvert << 2 | window_.col.twoEnable << 3;
+    w.bg1en = window_.bg1.aboveEnable | window_.bg1.belowEnable << 1;
+    w.bg2en = window_.bg2.aboveEnable | window_.bg2.belowEnable << 1;
+    w.bg3en = window_.bg3.aboveEnable | window_.bg3.belowEnable << 1;
+    w.bg4en = window_.bg4.aboveEnable | window_.bg4.belowEnable << 1;
+    w.objen = window_.obj.aboveEnable | window_.obj.belowEnable << 1;
+    return w;
+  }
+  auto debugM7Flags() const -> uint8 {
+    return uint8(io_.hflipMode7 | io_.vflipMode7 << 1 | io_.repeatMode7 << 6);
+  }
 
   // ---- save states (phase 7) ----
   auto serialize(Writer& w) const -> void;
@@ -447,12 +495,16 @@ class Ppu : public Thread {
   bool irqFlag_ = false;
   bool hblank_ = false;
   bool nmiEdgePrev_ = false;
+  bool nmiLatch_ = false;  // $4210 bit7: armed at V=225, cleared by read/$4210
   bool wrioBit7_ = false;
 
   std::function<void(bool)> nmiPin_;
   std::function<void(bool)> irqPin_;
   std::function<void()> frameStartSink_;  // V=0 (phase 5 HDMA table reload)
   std::function<void()> hblankSink_;      // H=274 (phase 5 HDMA transfer)
+  std::function<void()> autoJoySink_;     // H~76,V=225 (auto-joypad-read start)
+  bool autoJoyBusy_ = false;
+  int autoJoyCyclesLeft_ = 0;
 
   uint16 frameBuffer_[kFrameWidth * kFrameHeight] = {};
 

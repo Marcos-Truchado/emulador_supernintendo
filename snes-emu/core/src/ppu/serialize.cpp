@@ -126,7 +126,7 @@ auto Ppu::serialize(Writer& w) const -> void {
   w.u64(frame_); w.u64(renderedFrames_);
   w.b(pendingStart_);
   w.u8(nmitimen_); w.u16(htime_); w.u16(vtime_);
-  w.b(vblank_); w.b(irqFlag_); w.b(hblank_); w.b(nmiEdgePrev_); w.b(wrioBit7_);
+  w.b(vblank_); w.b(irqFlag_); w.b(hblank_); w.b(nmiEdgePrev_); w.b(nmiLatch_); w.b(wrioBit7_);
 }
 
 auto Ppu::deserialize(Reader& r) -> void {
@@ -247,7 +247,7 @@ auto Ppu::deserialize(Reader& r) -> void {
   frame_ = r.u64(); renderedFrames_ = r.u64();
   pendingStart_ = r.b();
   nmitimen_ = r.u8(); htime_ = r.u16(); vtime_ = r.u16();
-  vblank_ = r.b(); irqFlag_ = r.b(); hblank_ = r.b(); nmiEdgePrev_ = r.b(); wrioBit7_ = r.b();
+  vblank_ = r.b(); irqFlag_ = r.b(); hblank_ = r.b(); nmiEdgePrev_ = r.b(); nmiLatch_ = r.b(); wrioBit7_ = r.b();
 }
 
 }  // namespace snes

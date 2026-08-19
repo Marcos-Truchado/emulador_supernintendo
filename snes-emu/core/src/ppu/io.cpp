@@ -611,6 +611,8 @@ auto Ppu::captureCounters() -> void {
 // ---- framebuffer readback ----
 
 auto Ppu::pixelColor(int x, int y) const -> uint16 {
+  // Mirrors the composer: framebuffer row = scanline + 7 (non-overscan) or
+  // scanline - 1 (overscan), so visible row y = scanline y + 1.
   int row = y + (state_.overscan ? 0 : 8);
   int col = x + 26;
   uint16 v = frameBuffer_[row * kFrameWidth + col];

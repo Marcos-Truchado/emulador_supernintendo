@@ -117,6 +117,9 @@ class Bus : public Memory {
   // X=0x0040, L=0x0020, R=0x0010) exposed via auto-read $4218-$421F and
   // the manual-read shift registers $4016/$4017.
   auto setJoypad(int port, uint16 buttons) -> void;
+  // Snapshot the live joypad_ state into joypadLatched_; wired to
+  // Ppu::setAutoJoySink so $4218-$421F only update at auto-read time.
+  auto latchJoypads() -> void;
 
   // register readback for tests and later phases
   auto ppuRegister(uint8 offset) const -> uint8;  // $2100-$2133 write shadows
@@ -154,8 +157,9 @@ class Bus : public Memory {
 
   uint8 ppuReg_[0x34] = {};  // $2100-$2133 write shadows
   uint8 cpuReg_[0x10] = {};  // $4200-$420D write shadows
-  uint16 joypad_[4] = {};       // $4218-$421F auto-read button state
-  uint16 joypadShift_[4] = {};  // $4016/$4017 manual-read shift registers
+  uint16 joypad_[4] = {};         // live controller state, set by the frontend
+  uint16 joypadLatched_[4] = {};  // $4218-$421F: snapshot taken at auto-read time
+  uint16 joypadShift_[4] = {};    // $4016/$4017 manual-read shift registers
   bool joypadStrobe_ = false;   // $4016 bit0 latch
   uint8 dmaReg_[0x80] = {};  // $4300-$437B (8 channels x 16 bytes)
   uint32 wramAddr_ = 0;      // $2181-$2183 17-bit WRAM port address

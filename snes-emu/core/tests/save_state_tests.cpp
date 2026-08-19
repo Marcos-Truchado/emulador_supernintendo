@@ -70,13 +70,19 @@ TEST_CASE("integration: APU boot ROM handshake ($AA/$BB) through $2140/$2141") {
   CHECK(system.apu().readPort(1) == 0xBB);
 }
 
-TEST_CASE("integration: System::setJoypad drives $4218/$4219") {
+TEST_CASE("integration: System::setJoypad drives $4218/$4219 via auto-read") {
   TestRom rom;
-  rom.program({0x4C, 0x00, 0x80}, 0x008000);
+  rom.program({0x4C, 0x00, 0x80}, 0x008000);  // jmp $8000 (self loop)
 
   System system;
   boot(system, rom);
+  system.bus().write(0x004200, 0x01);    // NMITIMEN.0: enable auto-joypad-read
   system.setJoypad(0, 0x8000 | 0x0080);  // B + A
+
+  // $4218/$4219 only update once per frame, at the auto-read window
+  // (fullsnes "AUTO JOYPAD READ"); run long enough to cross it.
+  for (int i = 0; i < 500000; i++) system.step();
+
   CHECK(system.bus().read(0x004219) == 0x80);
   CHECK(system.bus().read(0x004218) == 0x80);
 }

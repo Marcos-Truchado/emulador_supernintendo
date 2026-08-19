@@ -52,18 +52,23 @@ void toggleFullscreen(SDL_Window* window) {
 // SNES button bit layout (matches Bus::setJoypad / $4218-$421F).
 constexpr snes::uint16 kB = 0x8000, kSelect = 0x2000, kStart = 0x1000;
 constexpr snes::uint16 kUp = 0x0800, kDown = 0x0400, kLeft = 0x0200, kRight = 0x0100;
-constexpr snes::uint16 kA = 0x0080;
+constexpr snes::uint16 kA = 0x0080, kX = 0x0040, kY = 0x4000;
+constexpr snes::uint16 kL = 0x0020, kR = 0x0010;
 
 auto readJoypad(const snes::uint8* keys) -> snes::uint16 {
   snes::uint16 v = 0;
-  if (keys[SDL_SCANCODE_SPACE]) v |= kA;   // jump
-  if (keys[SDL_SCANCODE_Q]) v |= kB;       // run / spin
-  if (keys[SDL_SCANCODE_W]) v |= kUp;
-  if (keys[SDL_SCANCODE_S]) v |= kDown;
-  if (keys[SDL_SCANCODE_A]) v |= kLeft;
-  if (keys[SDL_SCANCODE_D]) v |= kRight;
+  if (keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_X]) v |= kA;
+  if (keys[SDL_SCANCODE_Q] || keys[SDL_SCANCODE_Z]) v |= kB;
+  if (keys[SDL_SCANCODE_V]) v |= kX;
+  if (keys[SDL_SCANCODE_C]) v |= kY;
+  if (keys[SDL_SCANCODE_U]) v |= kL;
+  if (keys[SDL_SCANCODE_I]) v |= kR;
+  if (keys[SDL_SCANCODE_UP] || keys[SDL_SCANCODE_W]) v |= kUp;
+  if (keys[SDL_SCANCODE_DOWN] || keys[SDL_SCANCODE_S]) v |= kDown;
+  if (keys[SDL_SCANCODE_LEFT] || keys[SDL_SCANCODE_A]) v |= kLeft;
+  if (keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D]) v |= kRight;
   if (keys[SDL_SCANCODE_RETURN]) v |= kStart;
-  if (keys[SDL_SCANCODE_E]) v |= kSelect;
+  if (keys[SDL_SCANCODE_RSHIFT] || keys[SDL_SCANCODE_E]) v |= kSelect;
   return v;
 }
 
@@ -250,12 +255,23 @@ auto launcher(SDL_Renderer* renderer, SDL_Window* window) -> std::string {
 
     // Hint.
     {
-      SDL_Texture* t = renderText(renderer, "haz click en un juego para jugar - ESC para salir",
+      SDL_Texture* t = renderText(renderer, "Flechas/WASD mover - X/Space A - Z/Q B - Enter Start",
                                   kWhite.r, kWhite.g, kWhite.b, 1);
       if (t) {
         int w = 0, h = 0;
         SDL_QueryTexture(t, nullptr, nullptr, &w, &h);
-        SDL_Rect dst{winW / 2 - w / 2, winH - 30, w, h};
+        SDL_Rect dst{winW / 2 - w / 2, winH - 46, w, h};
+        SDL_RenderCopy(renderer, t, nullptr, &dst);
+        SDL_DestroyTexture(t);
+      }
+    }
+    {
+      SDL_Texture* t = renderText(renderer, "Shift/E Select - V X - C Y - U L - I R - F5 guardar - F8 cargar",
+                                  kWhite.r, kWhite.g, kWhite.b, 1);
+      if (t) {
+        int w = 0, h = 0;
+        SDL_QueryTexture(t, nullptr, nullptr, &w, &h);
+        SDL_Rect dst{winW / 2 - w / 2, winH - 28, w, h};
         SDL_RenderCopy(renderer, t, nullptr, &dst);
         SDL_DestroyTexture(t);
       }
@@ -311,13 +327,14 @@ auto runGame(const std::string& romPath, SDL_Renderer* renderer, SDL_Window* win
         switch (ev.key.keysym.sym) {
           case SDLK_ESCAPE: return true;  // back to launcher
           case SDLK_F11: toggleFullscreen(window); break;
-          case SDLK_z: saveStateFile(system, statePath); break;
-          case SDLK_x: loadStateFile(system, statePath); break;
+          case SDLK_F5: saveStateFile(system, statePath); break;
+          case SDLK_F8: loadStateFile(system, statePath); break;
           default: break;
         }
       }
     }
 
+    SDL_PumpEvents();
     system.setJoypad(0, readJoypad(SDL_GetKeyboardState(nullptr)));
     runFrame();
 

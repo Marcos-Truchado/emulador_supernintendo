@@ -42,11 +42,11 @@ auto Ppu::advanceDot() -> void {
     }
   }
 
-  // VBlank: set at H=0, V=225; the NMI flag follows half a dot later
-  // (H=0.5) — unobservable at dot-granularity sampling, same dot here.
-  // End of VBlank at H=0, V=0 auto-clears both.
-  if (dot_ == 0 && scanline_ == 225) vblank_ = true;
-  if (dot_ == 0 && scanline_ == 0) vblank_ = false;
+  // VBlank: set at H=0, V=225; the $4210 NMI latch arms half a dot later
+  // (H=0.5) — unobservable at dot-granularity sampling, same dot here. Both
+  // clear at H=0, V=0 (snes9x cpuexec.cpp V=0: $4210 = version).
+  if (dot_ == 0 && scanline_ == 225) vblank_ = true, nmiLatch_ = true;
+  if (dot_ == 0 && scanline_ == 0) vblank_ = false, nmiLatch_ = false;
 
   // HBlank flag (toggles every scanline, including VBlank): set H=274,
   // cleared at H=1 of the following scanline (so set during H=274..340,0).
@@ -72,11 +72,13 @@ auto Ppu::advanceDot() -> void {
 
   // NMI delivery (phase 3b): edge-detect the internal flag, which is the
   // AND of NMITIMEN.7 and the $4210 latch (fullsnes: "NMI flag gets set
-  // when [4200h].7 AND [4210h].7 changes from 0-to-1"). Raised once per
-  // 0->1 edge; the CPU clears its pin on dispatch, so one edge = one NMI.
-  // Re-enabling NMITIMEN.7 inside a pending VBlank re-arms the edge (an
-  // "old NMI mis-executed", exactly as on hardware).
-  bool nmiSource = (nmitimen_ & 0x80) && vblank_;
+  // when [4200h].7 AND [4210h].7 changes from 0-to-1"). The latch arms at
+  // V=225 and clears on a $4210 read, so re-enabling NMITIMEN.7 inside a
+  // pending VBlank re-arms the edge only while $4210 is unread (snes9x
+  // ppu.cpp "NMI can trigger immediately during VBlank as long as
+  // NMI_read ($4210) wasn't cleared"). Raised once per 0->1 edge; the CPU
+  // clears its pin on dispatch, so one edge = one NMI.
+  bool nmiSource = (nmitimen_ & 0x80) && nmiLatch_;
   if (nmiSource && !nmiEdgePrev_ && nmiPin_) nmiPin_(true);
   nmiEdgePrev_ = nmiSource;
 
@@ -85,6 +87,22 @@ auto Ppu::advanceDot() -> void {
   // its own latch and after RTI (re-fires until $4211 is read or the IRQ
   // is disabled — fullsnes level semantics).
   driveIrqPin();
+
+  // Auto-joypad-read (fullsnes "AUTO JOYPAD READ"): once per frame, if
+  // $4200 bit0 is set, the read starts between H=32.5 and H=95.5 of the
+  // first VBlank scanline (approximated here at H=76) and keeps $4212
+  // bit0 set for 4224 master cycles (1056 dots). Many games poll for the
+  // 0->1 edge of this bit before trusting $4218-$421F, so it must actually
+  // transition — a permanently-0 bit0 hangs any game using that idiom.
+  if (dot_ == 76 && scanline_ == 225 && (nmitimen_ & 0x01) && !autoJoyBusy_) {
+    autoJoyBusy_ = true;
+    autoJoyCyclesLeft_ = 4224;
+    if (autoJoySink_) autoJoySink_();
+  }
+  if (autoJoyBusy_) {
+    autoJoyCyclesLeft_ -= 4;  // 4 master cycles per dot
+    if (autoJoyCyclesLeft_ <= 0) autoJoyBusy_ = false;
+  }
 
   // ---- phase 4 render pipeline (ppu.hpp cadence) ----
   if (dot_ == 0) {
@@ -160,8 +178,8 @@ auto Ppu::write4209(uint8 data) -> void { vtime_ = (vtime_ & 0x100) | data; }
 auto Ppu::write420A(uint8 data) -> void { vtime_ = (vtime_ & 0x0FF) | ((uint16(data) & 1) << 8); }
 
 auto Ppu::read4210() -> uint8 {
-  uint8 value = (vblank_ ? 0x80 : 0x00) | kCpuVersion;
-  vblank_ = false;  // Read/Ack (also auto-cleared at end of VBlank)
+  uint8 value = (nmiLatch_ ? 0x80 : 0x00) | kCpuVersion;
+  nmiLatch_ = false;  // Read/Ack (also auto-cleared at end of VBlank)
   return value;
 }
 
@@ -176,7 +194,7 @@ auto Ppu::read4211() -> uint8 {
 
 auto Ppu::read4212() -> uint8 {
   // Live mirror of the counters: never cleared by reading.
-  return (vblankPeriod() ? 0x80 : 0x00) | (hblank_ ? 0x40 : 0x00);
+  return (vblankPeriod() ? 0x80 : 0x00) | (hblank_ ? 0x40 : 0x00) | (autoJoyBusy_ ? 0x01 : 0x00);
 }
 
 // ---- power / reset ----
@@ -193,6 +211,9 @@ auto Ppu::power() -> void {
   irqFlag_ = false;
   hblank_ = false;
   nmiEdgePrev_ = false;
+  nmiLatch_ = false;
+  autoJoyBusy_ = false;
+  autoJoyCyclesLeft_ = 0;
   pendingStart_ = true;
   resetRegisters();
   driveIrqPin();
@@ -209,6 +230,8 @@ auto Ppu::reset() -> void {
   vblank_ = false;
   hblank_ = false;
   nmiEdgePrev_ = false;
+  autoJoyBusy_ = false;
+  autoJoyCyclesLeft_ = 0;
   pendingStart_ = true;
   resetRegisters();
   driveIrqPin();

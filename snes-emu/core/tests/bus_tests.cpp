@@ -245,13 +245,19 @@ TEST_CASE("bus: joypad auto-read ($4218/$4219) and manual shift ($4016)") {
   bus.power();
 
   // Auto-read: 16-bit state, JOY1L = A/X/L/R, JOY1H = B/Y/Sel/Start/D-pad.
+  // $4218/$4219 only reflect setJoypad() once the auto-read window has
+  // latched it (fullsnes "AUTO JOYPAD READ"); latchJoypads() is what
+  // Ppu::setAutoJoySink fires at that point in real playback.
   bus.setJoypad(0, 0x8000);           // B
+  bus.latchJoypads();
   CHECK(bus.read(0x004219) == 0x80);
   CHECK(bus.read(0x004218) == 0x00);
   bus.setJoypad(0, 0x0080);           // A
+  bus.latchJoypads();
   CHECK(bus.read(0x004218) == 0x80);
   CHECK(bus.read(0x004219) == 0x00);
   bus.setJoypad(0, 0x0010);           // R
+  bus.latchJoypads();
   CHECK(bus.read(0x004218) == 0x10);
 
   // Manual read: latch on strobe, then shift out MSB-first

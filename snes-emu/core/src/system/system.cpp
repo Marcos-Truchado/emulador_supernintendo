@@ -29,6 +29,9 @@ System::System() : cartridge_(std::make_unique<Cartridge>()),
   // Phase 5: PPU frame-start / HBlank events drive the DMA/HDMA engine.
   ppu_->setFrameStartSink([this]() { bus_->hdmaReset(); });
   ppu_->setHblankSink([this]() { bus_->hdmaRun(); });
+  // Auto-joypad-read: latch $4218-$421F once per frame when the read
+  // window opens (see Ppu::advanceDot / read4212 bit0).
+  ppu_->setAutoJoySink([this]() { bus_->latchJoypads(); });
 }
 
 System::~System() = default;

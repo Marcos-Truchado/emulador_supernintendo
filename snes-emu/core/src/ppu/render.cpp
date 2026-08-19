@@ -608,8 +608,17 @@ auto Ppu::WindowMask::resetState() -> void {
 auto Ppu::Composer::lineStart() -> void {
   line = nullptr;
 
+  // Visible picture = scanlines 1..224 (non-overscan) / 1..240 (overscan),
+  // matching snes9x (FIRST_VISIBLE_LINE = 1, screen row = scanline - 1).
+  // Non-overscan keeps the 8-row top border of the video signal.
   uint32 vcounter = ppu.scanline();
-  if (!ppu.state_.overscan) vcounter += 8;
+  if (!ppu.state_.overscan) {
+    vcounter += 7;
+  } else if (vcounter > 0) {
+    vcounter -= 1;
+  } else {
+    vcounter = 241;  // scanline 0 has no screen row
+  }
   if (vcounter < 240) {
     line = ppu.frameBuffer_ + uint64(vcounter) * kFrameWidth + 26;
   }
