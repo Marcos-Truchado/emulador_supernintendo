@@ -1,0 +1,15 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/matru/Desktop/emulador_supernintendo/snes-emu/build_debug/cmake_install.cmake",
+		"/Users/matru/Desktop/emulador_supernintendo/snes-emu/build_debug/core/cmake_install.cmake",
+		"/Users/matru/Desktop/emulador_supernintendo/snes-emu/build_debug/core/tests/cmake_install.cmake",
+		"/Users/matru/Desktop/emulador_supernintendo/snes-emu/build_debug/tools/cmake_install.cmake",
+		"/Users/matru/Desktop/emulador_supernintendo/snes-emu/build_debug/tools/cputest/cmake_install.cmake",
+		"/Users/matru/Desktop/emulador_supernintendo/snes-emu/build_debug/tools/fase3/cmake_install.cmake",
+		"/Users/matru/Desktop/emulador_supernintendo/snes-emu/build_debug/tools/aputrace/cmake_install.cmake",
+		"/Users/matru/Desktop/emulador_supernintendo/snes-emu/build_debug/tools/ff2trace/cmake_install.cmake",
+		"/Users/matru/Desktop/emulador_supernintendo/snes-emu/build_debug/frontend/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

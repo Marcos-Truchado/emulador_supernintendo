@@ -1,0 +1,43 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/snes_tests.dir/apu_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/apu_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/bus_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/bus_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/cartridge_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/cartridge_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/coprocessor_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/coprocessor_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/cpu_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/cpu_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/dma_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/dma_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/interrupt_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/interrupt_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/main.cpp.o"
+  "CMakeFiles/snes_tests.dir/main.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/ppu_bg_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/ppu_bg_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/ppu_colormath_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/ppu_colormath_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/ppu_mmio_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/ppu_mmio_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/ppu_mode7_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/ppu_mode7_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/ppu_sprite_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/ppu_sprite_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/ppu_timing_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/ppu_timing_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/ppu_window_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/ppu_window_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/save_state_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/save_state_tests.cpp.o.d"
+  "CMakeFiles/snes_tests.dir/scheduler_tests.cpp.o"
+  "CMakeFiles/snes_tests.dir/scheduler_tests.cpp.o.d"
+  "snes_tests"
+  "snes_tests.pdb"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/snes_tests.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()

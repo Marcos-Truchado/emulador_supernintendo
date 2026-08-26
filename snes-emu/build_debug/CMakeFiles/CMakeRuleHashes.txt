@@ -1,0 +1,3 @@
+# Hashes of file build rules.
+0dc40bf8185f2e6e54deab82d3d257e9 tools/fase3/CMakeFiles/fase3_rom
+6eb73feecc3dbfb89c279e4026fd0e50 tools/fase3/fase3_timing.sfc

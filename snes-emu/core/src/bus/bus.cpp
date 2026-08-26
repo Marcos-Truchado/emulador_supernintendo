@@ -1,6 +1,7 @@
 #include "snes/snes.hpp"
 
 #include "apu/apu.hpp"
+#include "coprocessor/coprocessor.hpp"
 #include "ppu/ppu.hpp"
 #include "scheduler/scheduler.hpp"
 #include "serialize/serialize.hpp"
@@ -8,6 +9,10 @@
 #include <algorithm>
 
 namespace snes {
+
+Bus::Bus(Cartridge& cartridge, Ppu& ppu, Scheduler& scheduler, Apu& apu)
+    : cartridge_(cartridge), ppu_(ppu), scheduler_(scheduler), apu_(apu) {}
+Bus::~Bus() = default;
 
 // DMA transfer unit (DMAPx bits 2-0) -> byte count and B-bus address offsets
 // from BBADx (fullsnes "Transfer Unit Selection"). Shared by GP-DMA and HDMA.
@@ -52,6 +57,7 @@ auto Bus::latch(uint8 value) -> uint8 {
 }
 
 auto Bus::read(uint24 address) -> uint8 {
+  if (coprocessor_ && coprocessor_->handles(address)) return latch(coprocessor_->read(address));
   uint32 bank = address >> 16;
   uint32 offs = address & 0xFFFF;
 
@@ -109,6 +115,7 @@ auto Bus::read(uint24 address) -> uint8 {
 
 void Bus::write(uint24 address, uint8 data) {
   lastData_ = data;  // every write drives the data bus (open-bus tracking)
+  if (coprocessor_ && coprocessor_->handles(address)) return coprocessor_->write(address, data);
   uint32 bank = address >> 16;
   uint32 offs = address & 0xFFFF;
 
@@ -556,6 +563,10 @@ void Bus::power() {
   cpuReg_[0x08] = 0x01;  // 4208 HTIMEH
   cpuReg_[0x09] = 0xFF;  // 4209 VTIMEL
   cpuReg_[0x0A] = 0x01;  // 420A VTIMEH
+
+  chip_ = detectChip(cartridge_);
+  coprocessor_ = makeCoprocessor(chip_, cartridge_.mapMode());
+  if (coprocessor_) coprocessor_->power();
 }
 
 void Bus::reset() {
@@ -618,6 +629,8 @@ auto Bus::serialize(Writer& w) const -> void {
   w.raw(joypad_, sizeof(joypad_));
   w.raw(joypadShift_, sizeof(joypadShift_));
   w.b(joypadStrobe_);
+  w.u8(uint8(chip_));
+  if (coprocessor_) coprocessor_->serialize(w);
 }
 
 auto Bus::deserialize(Reader& r) -> void {
@@ -644,6 +657,9 @@ auto Bus::deserialize(Reader& r) -> void {
   r.raw(joypad_, sizeof(joypad_));
   r.raw(joypadShift_, sizeof(joypadShift_));
   joypadStrobe_ = r.b();
+  chip_ = Chip(r.u8());
+  coprocessor_ = makeCoprocessor(chip_, cartridge_.mapMode());
+  if (coprocessor_) coprocessor_->deserialize(r);
 }
 
 }  // namespace snes

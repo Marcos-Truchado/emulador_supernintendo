@@ -22,6 +22,8 @@ using uint8 = std::uint8_t;
 using int8 = std::int8_t;
 using uint16 = std::uint16_t;
 using int16 = std::int16_t;
+using int32 = std::int32_t;
+using int64 = std::int64_t;
 using uint24 = std::uint32_t;  // 24-bit address, kept in a uint32
 using uint32 = std::uint32_t;
 using uint64 = std::uint64_t;
@@ -45,6 +47,9 @@ class Ppu;
 class Apu;
 class Writer;
 class Reader;
+class Coprocessor;
+
+enum class Chip : uint8 { none, srtc, obc1, dsp1, dsp3, dsp4 };
 
 enum class MapMode {
   unknown,
@@ -90,8 +95,8 @@ class Cartridge {
 // in lastData_).
 class Bus : public Memory {
  public:
-  explicit Bus(Cartridge& cartridge, Ppu& ppu, Scheduler& scheduler, Apu& apu)
-      : cartridge_(cartridge), ppu_(ppu), scheduler_(scheduler), apu_(apu) {}
+  explicit Bus(Cartridge& cartridge, Ppu& ppu, Scheduler& scheduler, Apu& apu);
+  ~Bus();
 
   auto read(uint24 address) -> uint8 override;
   auto write(uint24 address, uint8 data) -> void override;
@@ -176,6 +181,9 @@ class Bus : public Memory {
   uint16 divDividend_ = 0;   // $4204/$4205 dividend
   uint16 divQuotient_ = 0;   // $4214/$4215 division quotient
   uint16 mathResult_ = 0;    // $4216/$4217 product or remainder
+
+  std::unique_ptr<Coprocessor> coprocessor_;
+  Chip chip_ = Chip::none;
 };
 
 // System facade: wires cartridge + bus + PPU + scheduler + CPU, exposes

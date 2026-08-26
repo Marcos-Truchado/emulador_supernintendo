@@ -3,6 +3,12 @@
 add_library(snes_core STATIC
   src/cartridge/cartridge.cpp
   src/bus/bus.cpp
+  src/coprocessor/coprocessor.cpp
+  src/coprocessor/srtc.cpp
+  src/coprocessor/obc1.cpp
+  src/coprocessor/dsp1.cpp
+  src/coprocessor/dsp3.cpp
+  src/coprocessor/dsp4.cpp
   src/system/system.cpp
   src/scheduler/scheduler.cpp
   src/ppu/timing.cpp

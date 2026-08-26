@@ -1,0 +1,1 @@
+/usr/bin/c++ -fsanitize=address -g -O1 -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/snes_frontend.dir/src/main.cpp.o -o snes_frontend  -Wl,-rpath,/opt/homebrew/lib ../core/libsnes_core.a /opt/homebrew/lib/libSDL2-2.0.0.dylib /opt/homebrew/lib/libSDL2main.a

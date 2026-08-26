@@ -11,6 +11,7 @@ add_executable(snes_tests
   ppu_window_tests.cpp
   ppu_colormath_tests.cpp
   ppu_mode7_tests.cpp
+  coprocessor_tests.cpp
   dma_tests.cpp
   apu_tests.cpp
   interrupt_tests.cpp

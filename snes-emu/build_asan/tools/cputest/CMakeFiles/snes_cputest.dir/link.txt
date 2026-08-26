@@ -1,0 +1,1 @@
+/usr/bin/c++ -fsanitize=address -g -O1 -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/snes_cputest.dir/cputest.cpp.o -o snes_cputest  ../../core/libsnes_core.a
