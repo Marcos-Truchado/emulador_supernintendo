@@ -1,10 +1,10 @@
 #pragma once
 
-// coprocessor.hpp — on-cart enhancement chips (S-RTC, OBC-1, DSP family).
+// coprocessor.hpp — on-cart enhancement chips (S-RTC, OBC-1, DSP family, Cx4).
 //
 // Each chip owns its memory window(s) and its protocol state. The Bus asks
 // `handles(address)` before its own routing, so the chips decide where they
-// live (fullsnes "DSP Mapping" / OBC-1 / S-RTC sections):
+// live (fullsnes "DSP Mapping" / OBC-1 / S-RTC / CX4 sections):
 //
 //   S-RTC   00-3F/80-BF:2800-2801          (Dai Kaijuu Monogatari 2, ExHiROM)
 //   OBC-1   00-3F/80-BF:6000-7FFF          (Metal Combat, Battle Clash)
@@ -12,6 +12,7 @@
 //           LoROM 30-3F/B0-BF:8000-FFFF    (Super Mario Kart)
 //   DSP-3   LoROM 20-3F/A0-BF:8000-FFFF    (SD Gundam G-NEXT)
 //   DSP-4   LoROM 30-3F/B0-BF:8000-FFFF    (Top Gear 3000)
+//   Cx4     00-3F/80-BF:6000-7FFF          (Mega Man X2/X3, LoROM)
 //
 // Detection is header-driven via the chipset byte $FFD6 (fullsnes
 // "Chipset"): high nibble 5 = S-RTC, 2 = OBC-1, 0 = DSP family. Inside the
@@ -27,6 +28,7 @@
 #include "snes/snes.hpp"
 
 #include <memory>
+#include <vector>
 
 namespace snes {
 
@@ -42,6 +44,10 @@ class Coprocessor {
   virtual auto power() -> void = 0;
   virtual auto serialize(Writer& w) const -> void = 0;
   virtual auto deserialize(Reader& r) -> void = 0;
+  virtual auto setRom(const std::vector<uint8>& rom, MapMode mode) -> void {
+    (void)rom;
+    (void)mode;
+  }
 };
 
 // Header-based detection; Chip::none for plain cartridges.

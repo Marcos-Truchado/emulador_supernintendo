@@ -1,4 +1,5 @@
 #include "coprocessor/coprocessor.hpp"
+#include "coprocessor/cx4.hpp"
 #include "coprocessor/srtc.hpp"
 #include "coprocessor/obc1.hpp"
 #include "coprocessor/dsp1.hpp"
@@ -41,6 +42,9 @@ auto detectChip(const Cartridge& cartridge) -> Chip {
   switch (chipset >> 4) {
     case 0x5: return Chip::srtc;  // $55 = S-RTC
     case 0x2: return Chip::obc1;  // $25 = OBC-1
+    case 0xF:
+      if (chipset == 0xF3) return Chip::cx4;  // CX4 (Mega Man X2/X3)
+      return Chip::none;
     case 0x0:
       if (chipset == 0x00) return Chip::none;
       // DSP family inside $0x (03/05 used for DSP carts).
@@ -62,6 +66,7 @@ auto makeCoprocessor(Chip chip, MapMode mapMode) -> std::unique_ptr<Coprocessor>
     case Chip::dsp1: return std::make_unique<Dsp1>(mapMode == MapMode::hirom);
     case Chip::dsp3: return std::make_unique<Dsp3>();
     case Chip::dsp4: return std::make_unique<Dsp4>();
+    case Chip::cx4: return std::make_unique<Cx4>();
   }
   return nullptr;
 }

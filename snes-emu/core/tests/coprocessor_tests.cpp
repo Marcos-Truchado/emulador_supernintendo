@@ -4,6 +4,7 @@
 #include "coprocessor/coprocessor.hpp"
 #include "coprocessor/srtc.hpp"
 #include "coprocessor/obc1.hpp"
+#include "coprocessor/cx4.hpp"
 #include "coprocessor/dsp1.hpp"
 #include "coprocessor/dsp3.hpp"
 #include "coprocessor/dsp4.hpp"
@@ -69,6 +70,17 @@ TEST_CASE("coprocessor: plain ROM chipset 00 -> none") {
   auto rom = makeRom(MapMode::lorom, 0x8000, 0x00, 0x20);
   Cartridge c; std::string e; REQUIRE(c.load(std::move(rom), &e));
   CHECK(detectChip(c) == Chip::none);
+}
+
+TEST_CASE("coprocessor: detect Cx4 via chipset F3") {
+  auto rom = makeRom(MapMode::lorom, 0x8000, 0xF3, 0x20);
+  Cartridge c; std::string e; REQUIRE(c.load(std::move(rom), &e));
+  CHECK(detectChip(c) == Chip::cx4);
+  auto cop = makeCoprocessor(Chip::cx4, MapMode::lorom);
+  CHECK(cop != nullptr);
+  CHECK(cop->handles(0x006000) == true);
+  CHECK(cop->handles(0x007FFF) == true);
+  CHECK(cop->handles(0x008000) == false);
 }
 
 // ---- S-RTC ----
@@ -272,6 +284,66 @@ TEST_CASE("dsp4: multiply and window") {
   Writer w; dsp.serialize(w);
   Dsp4 dsp2; Reader r(w.data()); dsp2.deserialize(r);
   CHECK(r.ok());
+}
+
+// ---- Cx4 ----
+
+TEST_CASE("cx4: handles window and power") {
+  Cx4 cx4;
+  CHECK(cx4.handles(0x006000) == true);
+  CHECK(cx4.handles(0x007FFF) == true);
+  CHECK(cx4.handles(0x008000) == false);
+  CHECK(cx4.handles(0x806000) == true);
+  cx4.power();
+  CHECK(cx4.read(0x7F5E) == 0x00); // not busy
+}
+
+TEST_CASE("cx4: command 0x5C immediate reg fills test pattern") {
+  Cx4 cx4; cx4.power();
+  cx4.write(0x007F4D, 0x0E);
+  cx4.write(0x007F4F, 0x5C);
+  CHECK(cx4.read(0x006000) == 0x00);
+  CHECK(cx4.read(0x006001) == 0x00);
+  // first bytes of test pattern
+}
+
+TEST_CASE("cx4: command 0x40 sum and 0x54 square") {
+  Cx4 cx4; cx4.power();
+  // fill some RAM
+  cx4.write(0x006000, 0x01); cx4.write(0x006001, 0x02);
+  cx4.write(0x007F4D, 0x0E);
+  cx4.write(0x007F4F, 0x40);
+  uint16 sum = uint16(cx4.read(0x007F80)) | (uint16(cx4.read(0x007F81)) << 8);
+  CHECK(sum == 0x0003);
+  // square
+  cx4.write(0x007F80, 0x02); cx4.write(0x007F81, 0x00); cx4.write(0x007F82, 0x00);
+  cx4.write(0x007F4F, 0x54);
+  uint32 lo = uint32(cx4.read(0x007F83)) | (uint32(cx4.read(0x007F84)) << 8) | (uint32(cx4.read(0x007F85)) << 16);
+  CHECK(lo == 4);
+}
+
+TEST_CASE("cx4: serialize round-trip") {
+  Cx4 a; a.power(); a.write(0x006123, 0x42);
+  Writer w; a.serialize(w);
+  Cx4 b; Reader r(w.data()); b.deserialize(r);
+  CHECK(r.ok());
+  CHECK(b.read(0x006123) == 0x42);
+}
+
+TEST_CASE("cx4: dma copies from ROM") {
+  Cx4 cx4;
+  std::vector<uint8> rom(0x8000, 0xAA);
+  // put known bytes at LoROM 00:8000
+  rom[0x0000] = 0x11; rom[0x0001] = 0x22; rom[0x0002] = 0x33; rom[0x0003] = 0x44;
+  cx4.setRom(rom, MapMode::lorom);
+  cx4.power();
+  // set source 00:8000 -> 0x008000, dest 0x6000, len 4
+  cx4.write(0x007F40, 0x00); cx4.write(0x007F41, 0x80); cx4.write(0x007F42, 0x00);
+  cx4.write(0x007F43, 0x04); cx4.write(0x007F44, 0x00);
+  cx4.write(0x007F45, 0x00); cx4.write(0x007F46, 0x60);
+  cx4.write(0x007F47, 0x00);
+  CHECK(cx4.read(0x006000) == 0x11);
+  CHECK(cx4.read(0x006001) == 0x22);
 }
 
 // ---- Bus integration ----

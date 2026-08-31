@@ -566,7 +566,10 @@ void Bus::power() {
 
   chip_ = detectChip(cartridge_);
   coprocessor_ = makeCoprocessor(chip_, cartridge_.mapMode());
-  if (coprocessor_) coprocessor_->power();
+  if (coprocessor_) {
+    coprocessor_->setRom(cartridge_.rom(), cartridge_.mapMode());
+    coprocessor_->power();
+  }
 }
 
 void Bus::reset() {
@@ -659,7 +662,10 @@ auto Bus::deserialize(Reader& r) -> void {
   joypadStrobe_ = r.b();
   chip_ = Chip(r.u8());
   coprocessor_ = makeCoprocessor(chip_, cartridge_.mapMode());
-  if (coprocessor_) coprocessor_->deserialize(r);
+  if (coprocessor_) {
+    coprocessor_->setRom(cartridge_.rom(), cartridge_.mapMode());
+    coprocessor_->deserialize(r);
+  }
 }
 
 }  // namespace snes
