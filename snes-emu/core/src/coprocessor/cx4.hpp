@@ -36,6 +36,8 @@ class Cx4 : public Coprocessor {
   void ramWriteWord(uint16 off, uint16 v);
   void ramWrite3Word(uint16 off, uint32 v);
   auto getRomPointer(uint32 snesAddr) const -> const uint8*;
+  auto getCx4Pointer(uint32 snesAddr) -> uint8*;
+  auto getCx4Pointer(uint32 snesAddr) const -> const uint8*;
   void doDma();
   void execCommand(uint8 cmd);
 
@@ -65,6 +67,12 @@ class Cx4 : public Coprocessor {
   const uint8* romData_ = nullptr;
   size_t romSize_ = 0;
   MapMode romMode_ = MapMode::unknown;
+
+  // busy + program paging (7F49-4B, 7F4D-4E, 7F48/7F52)
+  bool busy_ = false;
+  uint32 progBase_ = 0;   // 24-bit base from 7F49-4B (LoROM addr)
+  uint16 progPage_ = 0;   // 7F4D-4E
+  uint8 cacheEn_ = 0;     // 7F48
 
   // transient scale regs from c4.cpp (ported as members, not globals)
   int16 wfxVal_ = 0, wfyVal_ = 0, wfzVal_ = 0;

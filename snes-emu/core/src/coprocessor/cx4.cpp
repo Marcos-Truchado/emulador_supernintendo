@@ -216,6 +216,24 @@ auto Cx4::getRomPointer(uint32 snesAddr) const -> const uint8* {
   return romData_ + fileOff;
 }
 
+auto Cx4::getCx4Pointer(uint32 snesAddr) -> uint8* {
+  return const_cast<uint8*>(static_cast<const Cx4*>(this)->getCx4Pointer(snesAddr));
+}
+auto Cx4::getCx4Pointer(uint32 snesAddr) const -> const uint8* {
+  uint16 a = snesAddr & 0xFFFF;
+  // CX4 RAM window 6000-7FFF in banks 00-3F/80-BF
+  if (a >= 0x6000 && a <= 0x7FFF) {
+    uint32 bank = snesAddr >> 16;
+    bool isCx4Bank = (bank <= 0x3F) || (bank >= 0x80 && bank <= 0xBF);
+    if (isCx4Bank) {
+      uint16 off = a - 0x6000;
+      if (off < ram_.size()) return ram_.data() + off;
+    }
+  }
+  // try ROM
+  return getRomPointer(snesAddr);
+}
+
 void Cx4::doDma() {
   uint32 src = ramRead3Word(0x1F40);
   uint16 len16 = ramReadWord(0x1F43);
@@ -227,7 +245,7 @@ void Cx4::doDma() {
   const uint8* srcPtr = getRomPointer(src);
   if (srcPtr) {
     // copy byte by byte to handle wrap
-    for (uint16 i = 0; i < len; i++) {
+    for (uint32 i = 0; i < len; i++) {
       if (dstOff + i < ram_.size()) ram_[dstOff + i] = srcPtr[i];
     }
   } else {
@@ -326,20 +344,16 @@ void Cx4::convOam() {
       uint8 sprName = srcPtr[5];
       uint8 sprAttr = srcPtr[4] | srcPtr[6];
       uint32 addr = uint32(srcPtr[7]) | (uint32(srcPtr[8]) << 8) | (uint32(srcPtr[9]) << 16);
-      const uint8* sprData = getRomPointer(addr);
-      // fallback to ram if no ROM
-      if (!sprData) sprData = ram_.data() + 0x600; // dummy
-      if (sprData && *sprData != 0) {
-        int16 X, Y;
+      uint8* sprData = getCx4Pointer(addr);
+      if (!sprData) sprData = ram_.data() + 0x600;
+      if (*sprData != 0) {
         for (int cnt = sprData[0]; cnt > 0 && sprCount > 0; cnt--) {
-          // simplified: use sprData offset walking (port faithfully but compact)
-          // original loops over sprptr[1..3] — we keep the same bounds checks
           sprData += 4;
-          X = int8(sprData[1]);
+          int16 X = int8(sprData[1]);
           if (sprAttr & 0x40) X = -X - ((sprData[0] & 0x20) ? 16 : 8);
           X += sprX;
           if (X < -16 || X > 272) continue;
-          Y = int8(sprData[2]);
+          int16 Y = int8(sprData[2]);
           if (sprAttr & 0x80) Y = -Y - ((sprData[0] & 0x20) ? 16 : 8);
           Y += sprY;
           if (Y < -16 || Y > 224) continue;
@@ -452,36 +466,29 @@ void Cx4::drawLine(int32 X1, int32 Y1, int16 Z1, int32 X2, int32 Y2, int16 Z2, u
 }
 
 void Cx4::drawWireFrame() {
-  uint32 base = ramRead3Word(0x1F80);
-  const uint8* romBase = getRomPointer(base);
-  // fallback to ram pointer if ROM not mapped (for test)
-  uint8 lineAddr = ram_[0x295];
-  // line data is at base in ROM/ram — try ROM first
-  for (int i = lineAddr; i > 0; i--) {
-    // snes9x reads 5 bytes per edge from getMemPointer(base)
-    // For our port we read from ram if base is in 6000 range else ROM
-    uint32 edgeAddr = base + (lineAddr - i) * 5;
-    const uint8* edge = getRomPointer(edgeAddr);
-    if (!edge) edge = ram_.data() + (edgeAddr & 0x1FFF);
-    uint8 a0 = edge[0], a1 = edge[1], a2 = edge[2], a3 = edge[3], col = edge[4];
-    uint16 p1off = (uint16(a0) << 8) | a1;
-    uint16 p2off = (uint16(a2) << 8) | a3;
-    uint32 p1addr = (uint32(ram_[0x1F82]) << 16) | p1off;
-    uint32 p2addr = (uint32(ram_[0x1F82]) << 16) | p2off;
-    const uint8* p1 = getRomPointer(p1addr);
-    const uint8* p2 = getRomPointer(p2addr);
-    if (!p1) p1 = ram_.data() + (p1off & 0x1FFF);
-    if (!p2) p2 = ram_.data() + (p2off & 0x1FFF);
-    int16 X1 = int16(p1[0] << 8 | p1[1]);
-    int16 Y1 = int16(p1[2] << 8 | p1[3]);
-    int16 Z1 = int16(p1[4] << 8 | p1[5]);
-    int16 X2 = int16(p2[0] << 8 | p2[1]);
-    int16 Y2 = int16(p2[2] << 8 | p2[3]);
-    int16 Z2 = int16(p2[4] << 8 | p2[5]);
+  uint8* line = getCx4Pointer(ramRead3Word(0x1F80));
+  if (!line) return;
+  for (int i = ram_[0x295]; i > 0; i--, line += 5) {
+    uint8* point1;
+    uint8* point2;
+    if (line[0] == 0xFF && line[1] == 0xFF) {
+      uint8* tmp = line - 5;
+      while (tmp[2] == 0xFF && tmp[3] == 0xFF) tmp -= 5;
+      point1 = getCx4Pointer((uint32(ram_[0x1F82]) << 16) | (uint32(tmp[2]) << 8) | tmp[3]);
+    } else {
+      point1 = getCx4Pointer((uint32(ram_[0x1F82]) << 16) | (uint32(line[0]) << 8) | line[1]);
+    }
+    point2 = getCx4Pointer((uint32(ram_[0x1F82]) << 16) | (uint32(line[2]) << 8) | line[3]);
+    if (!point1 || !point2) continue;
+    int16 X1 = int16(point1[0] << 8 | point1[1]);
+    int16 Y1 = int16(point1[2] << 8 | point1[3]);
+    int16 Z1 = int16(point1[4] << 8 | point1[5]);
+    int16 X2 = int16(point2[0] << 8 | point2[1]);
+    int16 Y2 = int16(point2[2] << 8 | point2[3]);
+    int16 Z2 = int16(point2[4] << 8 | point2[5]);
+    uint8 col = line[4];
     drawLine(X1, Y1, Z1, X2, Y2, Z2, col);
-    (void)romBase;
   }
-  // keep compatibility with snes9x: if lineAddr==0, nothing drawn (handled)
 }
 
 void Cx4::transformLines() {
@@ -713,7 +720,7 @@ void Cx4::execCommand(uint8 cmd) {
 
 auto Cx4::read(uint24 address) -> uint8 {
   uint16 a = address & 0xFFFF;
-  if (a == 0x7F5E) return 0x00; // not busy (snes9x always 0)
+  if (a == 0x7F5E) return busy_ ? 0x40 : 0x00;
   if (a < 0x6000 || a > 0x7FFF) return 0xFF;
   return ram_[a - 0x6000];
 }
@@ -722,13 +729,23 @@ auto Cx4::write(uint24 address, uint8 data) -> void {
   uint16 a = address & 0xFFFF;
   if (a < 0x6000 || a > 0x7FFF) return;
   ram_[a - 0x6000] = data;
-  if (a == 0x7F47 && data == 0x00) doDma();
-  else if (a == 0x7F4F) {
+  if (a == 0x7F48) { cacheEn_ = data; return; }
+  if (a == 0x7F49) { progBase_ = (progBase_ & 0xFFFF00) | data; return; }
+  if (a == 0x7F4A) { progBase_ = (progBase_ & 0xFF00FF) | (uint32(data) << 8); return; }
+  if (a == 0x7F4B) { progBase_ = (progBase_ & 0x00FFFF) | (uint32(data) << 16); return; }
+  if (a == 0x7F4D) { progPage_ = (progPage_ & 0xFF00) | data; return; }
+  if (a == 0x7F4E) { progPage_ = (progPage_ & 0x00FF) | (uint32(data) << 8); return; }
+  if (a == 0x7F52) { /* hard reset, ignore */ return; }
+  if (a == 0x7F47 && data == 0x00) { busy_ = true; doDma(); busy_ = false; return; }
+  if (a == 0x7F4F) {
+    busy_ = true;
     if (ram_[0x1F4D] == 0x0E && data < 0x40 && (data & 3) == 0) {
       ram_[0x1F80] = data >> 2;
     } else {
       execCommand(data);
     }
+    busy_ = false;
+    return;
   }
 }
 
@@ -737,6 +754,7 @@ void Cx4::power() {
   wfxVal_ = wfyVal_ = wfzVal_ = wfx2Val_ = wfy2Val_ = wfDist_ = wfScale_ = 0;
   f41FXVal_ = f41FYVal_ = f41FAngleRes_ = f41FDist_ = f41FDistVal_ = 0;
   c4x_ = c4y_ = c4z_ = c4x2_ = c4y2_ = c4z2_ = tanVal_ = 0;
+  busy_ = false; progBase_ = 0; progPage_ = 0; cacheEn_ = 0;
 }
 
 auto Cx4::serialize(Writer& w) const -> void {
@@ -744,6 +762,7 @@ auto Cx4::serialize(Writer& w) const -> void {
   w.u16(uint16(wfxVal_)); w.u16(uint16(wfyVal_)); w.u16(uint16(wfzVal_));
   w.u16(uint16(wfx2Val_)); w.u16(uint16(wfy2Val_)); w.u16(uint16(wfDist_)); w.u16(uint16(wfScale_));
   w.u16(uint16(f41FXVal_)); w.u16(uint16(f41FYVal_)); w.u16(uint16(f41FAngleRes_)); w.u16(uint16(f41FDist_)); w.u16(uint16(f41FDistVal_));
+  w.b(busy_); w.u32(progBase_); w.u16(progPage_); w.u8(cacheEn_);
 }
 
 auto Cx4::deserialize(Reader& r) -> void {
@@ -751,6 +770,7 @@ auto Cx4::deserialize(Reader& r) -> void {
   wfxVal_ = int16(r.u16()); wfyVal_ = int16(r.u16()); wfzVal_ = int16(r.u16());
   wfx2Val_ = int16(r.u16()); wfy2Val_ = int16(r.u16()); wfDist_ = int16(r.u16()); wfScale_ = int16(r.u16());
   f41FXVal_ = int16(r.u16()); f41FYVal_ = int16(r.u16()); f41FAngleRes_ = int16(r.u16()); f41FDist_ = int16(r.u16()); f41FDistVal_ = int16(r.u16());
+  busy_ = r.b(); progBase_ = r.u32(); progPage_ = r.u16(); cacheEn_ = r.u8();
 }
 
 auto Cx4::setRom(const std::vector<uint8>& rom, MapMode mode) -> void {
