@@ -11,9 +11,13 @@ static bool isCopierHeader(uint64 size) { return (size % 0x8000) == 512; }
 //   bits 7-6 always 0, bit5 always 1, bit4 = speed (0=Slow, 1=Fast),
 //   bits 3-0 map mode (0=LoROM, 1=HiROM, 2=LoROM+S-DD1, 3=LoROM+SA-1,
 //   5=ExHiROM, A=HiROM+SPC7110). Only the low nibble selects the map family.
-static bool isLoRomFamily(uint8 b) { return (b & 0x0F) == 0x00; }
+static bool isLoRomFamily(uint8 b) {
+  uint8 m = b & 0x0F;
+  return m == 0x00 || m == 0x02 || m == 0x03;  // 02=S-DD1, 03=SA-1 still LoROM
+}
 static bool isHiRomFamily(uint8 b) { return (b & 0x0F) == 0x01; }
 static bool isExHiRomFamily(uint8 b) { return (b & 0x0F) == 0x05; }
+static bool isSdd1Family(uint8 b) { return (b & 0x0F) == 0x02; }
 
 // Raw-image file offset of the given 24-bit address for a map mode, before the
 // copier header is stripped. Returns the 32-bit max (as the "unmapped" marker)

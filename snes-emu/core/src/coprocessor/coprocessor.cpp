@@ -1,5 +1,6 @@
 #include "coprocessor/coprocessor.hpp"
 #include "coprocessor/cx4.hpp"
+#include "coprocessor/sdd1.hpp"
 #include "coprocessor/srtc.hpp"
 #include "coprocessor/obc1.hpp"
 #include "coprocessor/dsp1.hpp"
@@ -38,6 +39,12 @@ auto detectChip(const Cartridge& cartridge) -> Chip {
   if (base == uint32(-1) || base + 0x30 > cartridge.romSize()) return Chip::none;
   const uint8* h = cartridge.rom().data() + base;
   const uint8 chipset = h[0x16];  // $FFD6
+  const uint8 mapByte = h[0x15];  // $FFD5
+
+  // S-DD1 is identified by map low nibble 2 (LoROM+S-DD1) — Street Fighter Alpha 2, Star Ocean
+  if ((mapByte & 0x0F) == 0x02) return Chip::sdd1;
+  // also handle chipset 0x43/0x44 which some S-DD1 carts use
+  if (chipset == 0x43 || chipset == 0x44) return Chip::sdd1;
 
   switch (chipset >> 4) {
     case 0x5: return Chip::srtc;  // $55 = S-RTC
@@ -67,6 +74,7 @@ auto makeCoprocessor(Chip chip, MapMode mapMode) -> std::unique_ptr<Coprocessor>
     case Chip::dsp3: return std::make_unique<Dsp3>();
     case Chip::dsp4: return std::make_unique<Dsp4>();
     case Chip::cx4: return std::make_unique<Cx4>();
+    case Chip::sdd1: return std::make_unique<Sdd1>();
   }
   return nullptr;
 }

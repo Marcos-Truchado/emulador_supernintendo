@@ -2,11 +2,13 @@
 
 #include "apu/apu.hpp"
 #include "coprocessor/coprocessor.hpp"
+#include "coprocessor/sdd1.hpp"
 #include "ppu/ppu.hpp"
 #include "scheduler/scheduler.hpp"
 #include "serialize/serialize.hpp"
 
 #include <algorithm>
+#include <vector>
 
 namespace snes {
 
@@ -425,6 +427,36 @@ auto Bus::dmaTransfer(int channel) -> void {
   uint16 aoffs = uint16((uint16(r[0x3]) << 8) | r[0x2]);
   uint32 len = (uint32(r[0x6]) << 8) | r[0x5];
   if (len == 0) len = 0x10000;  // 0 encodes 65536 bytes (fullsnes)
+
+  // S-DD1 hook: decompress on the fly when DMA reads from S-DD1 ROM (fixed address)
+  // fullsnes S-DD1 + snes9x dma.cpp SDD1 path. HLE, not cycle-accurate, but data-accurate.
+  if (chip_ == Chip::sdd1 && coprocessor_ && !direction && step == 1) {
+    auto* sdd1 = static_cast<Sdd1*>(coprocessor_.get());
+    if (sdd1 && sdd1->activeForChannel(channel)) {
+      uint32 snesSrc = (uint32(abank) << 16) | aoffs;
+      const uint8* in = sdd1->getMappedRomPointer(snesSrc);
+      if (in) {
+        std::vector<uint8> decoded(len);
+        sdd1->decompressBlock(in, decoded.data(), int(len));
+        uint32 srcIdx = 0;
+        uint32 remaining = len;
+        while (remaining > 0) {
+          const int n = bytes < int(remaining) ? bytes : int(remaining);
+          scheduler_.sync();
+          for (int i = 0; i < n; i++) {
+            uint8 bbusAddr = uint8(bbus + kDmaUnitBbus[unit][i]);
+            mmioWrite(0x2100 + bbusAddr, decoded[srcIdx + i]);
+          }
+          scheduler_.step(uint64(8) * n);
+          srcIdx += n;
+          remaining -= n;
+        }
+        scheduler_.sync();
+        sdd1->clearChannel(channel);
+        return;
+      }
+    }
+  }
 
   while (len > 0) {
     const int n = bytes < int(len) ? bytes : int(len);

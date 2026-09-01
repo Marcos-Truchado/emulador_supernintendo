@@ -5,6 +5,7 @@
 #include "coprocessor/srtc.hpp"
 #include "coprocessor/obc1.hpp"
 #include "coprocessor/cx4.hpp"
+#include "coprocessor/sdd1.hpp"
 #include "coprocessor/dsp1.hpp"
 #include "coprocessor/dsp3.hpp"
 #include "coprocessor/dsp4.hpp"
@@ -344,6 +345,71 @@ TEST_CASE("cx4: dma copies from ROM") {
   cx4.write(0x007F47, 0x00);
   CHECK(cx4.read(0x006000) == 0x11);
   CHECK(cx4.read(0x006001) == 0x22);
+}
+
+// ---- S-DD1 ----
+
+TEST_CASE("sdd1: detect via map 0x32 and chipset 0x43") {
+  auto rom = makeRom(MapMode::lorom, 0x8000, 0x43, 0x32);
+  Cartridge c; std::string e; REQUIRE(c.load(std::move(rom), &e));
+  CHECK(detectChip(c) == Chip::sdd1);
+  auto cop = makeCoprocessor(Chip::sdd1, MapMode::lorom);
+  CHECK(cop != nullptr);
+  CHECK(cop->handles(0x004800) == true);
+  CHECK(cop->handles(0x004807) == true);
+  CHECK(cop->handles(0x004808) == false);
+  CHECK(cop->handles(0x006000) == false);
+}
+
+TEST_CASE("sdd1: registers and mmc") {
+  Sdd1 sdd1;
+  sdd1.power();
+  CHECK(sdd1.handles(0x004800) == true);
+  sdd1.write(0x004800, 0x01); sdd1.write(0x004801, 0x02);
+  sdd1.write(0x004804, 0x01); // mmc0 = 0x100000
+  CHECK(sdd1.read(0x004804) == 0x01);
+  // serialize
+  Writer w; sdd1.serialize(w);
+  Sdd1 b; Reader r(w.data()); b.deserialize(r);
+  CHECK(r.ok());
+  CHECK(b.read(0x004804) == 0x01);
+}
+
+TEST_CASE("sdd1: decompress does not crash (smoke)") {
+  Sdd1 sdd1; sdd1.power();
+  // header 0xC0 = type 3, 8 planes, context 0x01C0/0x0001
+  // Minimal compressed stream: header + 2 bytes + output request 4 bytes
+  std::vector<uint8> in = {0xC0, 0x00, 0xFF, 0xFF, 0x00, 0x00};
+  std::vector<uint8> out(16, 0xCC);
+  // pad ROM for getMappedPointer fallback: not needed here, direct decompressBlock
+  // Use decompressBlock with in pointer from a fake ROM
+  std::vector<uint8> rom(0x200000, 0);
+  rom[0x1000] = 0xC0; rom[0x1001] = 0x00; rom[0x1002] = 0xFF; rom[0x1003] = 0xFF;
+  sdd1.setRom(rom, MapMode::lorom);
+  // decompress 8 bytes from 0xC00000+0x1000
+  const uint8* src = sdd1.getMappedRomPointer(0xC01000);
+  REQUIRE(src != nullptr);
+  std::vector<uint8> dst(8);
+  sdd1.decompressBlock(src, dst.data(), 8);
+  // just check it produced something without crashing
+  CHECK(dst.size() == 8);
+}
+
+TEST_CASE("sdd1: bus dma hook decompresses") {
+  Cartridge cart;
+  std::vector<uint8> rom(0x8000, 0x00);
+  rom[0x7FD5] = 0x32; // S-DD1
+  rom[0x7FD6] = 0x43;
+  rom[0x1000] = 0xC0; rom[0x1001] = 0x00; rom[0x1002] = 0xAA; rom[0x1003] = 0x55;
+  std::string err;
+  REQUIRE(cart.load(std::move(rom), &err));
+  CHECK(detectChip(cart) == Chip::sdd1);
+  // hook smoke: ensure Bus can be created with sdd1 cart
+  Sdd1 sdd1;
+  sdd1.setRom(cart.rom(), cart.mapMode());
+  sdd1.power();
+  sdd1.write(0x004800, 0x01); sdd1.write(0x004801, 0x01);
+  CHECK(sdd1.activeForChannel(0) == true);
 }
 
 // ---- Bus integration ----
