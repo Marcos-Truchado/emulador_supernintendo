@@ -3,6 +3,7 @@
 #include "apu/apu.hpp"
 #include "coprocessor/coprocessor.hpp"
 #include "coprocessor/sdd1.hpp"
+#include "coprocessor/spc7110.hpp"
 #include "ppu/ppu.hpp"
 #include "scheduler/scheduler.hpp"
 #include "serialize/serialize.hpp"
@@ -78,6 +79,10 @@ auto Bus::read(uint24 address) -> uint8 {
     if (offs < 0x8000) {
       // Expansion / SRAM window.
       if (!sram_.empty()) {
+        if (chip_ == Chip::spc7110 && coprocessor_) {
+          auto* spc = static_cast<Spc7110*>(coprocessor_.get());
+          if (!spc->sramEnabled()) return lastData_;
+        }
         bool hiromBank = (bank >= 0x20 && bank <= 0x3F) || (bank >= 0xA0 && bank <= 0xBF);
         bool exhiromBank = bank >= 0x80 && bank <= 0xBF;
         if ((cartridge_.mapMode() == MapMode::hirom && hiromBank) ||
@@ -87,6 +92,7 @@ auto Bus::read(uint24 address) -> uint8 {
       }
       return lastData_;  // no SRAM -> open bus
     }
+    // SPC7110 data ROM windows are handled via romRead mapping, but $50/$58 bypass ROM
     return romRead(address);
   }
 
@@ -133,6 +139,10 @@ void Bus::write(uint24 address, uint8 data) {
     if (offs < 0x6000) return;                           // unused -> no effect
     if (offs < 0x8000) {
       if (!sram_.empty()) {
+        if (chip_ == Chip::spc7110 && coprocessor_) {
+          auto* spc = static_cast<Spc7110*>(coprocessor_.get());
+          if (!spc->sramEnabled()) return;
+        }
         bool hiromBank = (bank >= 0x20 && bank <= 0x3F) || (bank >= 0xA0 && bank <= 0xBF);
         bool exhiromBank = bank >= 0x80 && bank <= 0xBF;
         if ((cartridge_.mapMode() == MapMode::hirom && hiromBank) ||
@@ -171,6 +181,16 @@ void Bus::sramWrite(uint32 offs, uint32 baseOffs, uint8 data) {
 }
 
 uint8 Bus::romRead(uint24 address) {
+  if (chip_ == Chip::spc7110 && coprocessor_) {
+    auto* spc = static_cast<Spc7110*>(coprocessor_.get());
+    uint32 mapped = spc->mapRomAddress(address);
+    if (mapped != UINT32_MAX) {
+      const std::vector<uint8>& rom = cartridge_.rom();
+      if (mapped < rom.size()) return latch(rom[mapped]);
+      if ((rom.size() & (rom.size() - 1)) == 0) return latch(rom[mapped & (rom.size() - 1)]);
+      return lastData_;
+    }
+  }
   uint32 offset = cartridge_.romOffset(address);
   if (offset == uint32(-1)) return lastData_;  // unmapped window -> open bus
   const std::vector<uint8>& rom = cartridge_.rom();

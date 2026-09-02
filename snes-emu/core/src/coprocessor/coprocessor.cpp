@@ -1,6 +1,7 @@
 #include "coprocessor/coprocessor.hpp"
 #include "coprocessor/cx4.hpp"
 #include "coprocessor/sdd1.hpp"
+#include "coprocessor/spc7110.hpp"
 #include "coprocessor/srtc.hpp"
 #include "coprocessor/obc1.hpp"
 #include "coprocessor/dsp1.hpp"
@@ -45,12 +46,16 @@ auto detectChip(const Cartridge& cartridge) -> Chip {
   if ((mapByte & 0x0F) == 0x02) return Chip::sdd1;
   // also handle chipset 0x43/0x44 which some S-DD1 carts use
   if (chipset == 0x43 || chipset == 0x44) return Chip::sdd1;
+  // SPC7110: HiROM+Spc7110 map nibble A + chipset F5/F9 (with/without RTC)
+  if ((mapByte & 0x0F) == 0x0A) return Chip::spc7110;
+  if (chipset == 0xF5 || chipset == 0xF9) return Chip::spc7110;
 
   switch (chipset >> 4) {
     case 0x5: return Chip::srtc;  // $55 = S-RTC
     case 0x2: return Chip::obc1;  // $25 = OBC-1
     case 0xF:
       if (chipset == 0xF3) return Chip::cx4;  // CX4 (Mega Man X2/X3)
+      if (chipset == 0xF5 || chipset == 0xF9) return Chip::spc7110;
       return Chip::none;
     case 0x0:
       if (chipset == 0x00) return Chip::none;
@@ -75,6 +80,7 @@ auto makeCoprocessor(Chip chip, MapMode mapMode) -> std::unique_ptr<Coprocessor>
     case Chip::dsp4: return std::make_unique<Dsp4>();
     case Chip::cx4: return std::make_unique<Cx4>();
     case Chip::sdd1: return std::make_unique<Sdd1>();
+    case Chip::spc7110: return std::make_unique<Spc7110>();
   }
   return nullptr;
 }

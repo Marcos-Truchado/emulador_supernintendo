@@ -49,7 +49,7 @@ class Writer;
 class Reader;
 class Coprocessor;
 
-enum class Chip : uint8 { none, srtc, obc1, dsp1, dsp3, dsp4, cx4, sdd1 };
+enum class Chip : uint8 { none, srtc, obc1, dsp1, dsp3, dsp4, cx4, sdd1, spc7110 };
 
 enum class MapMode {
   unknown,

@@ -18,6 +18,12 @@ static bool isLoRomFamily(uint8 b) {
 static bool isHiRomFamily(uint8 b) { return (b & 0x0F) == 0x01; }
 static bool isExHiRomFamily(uint8 b) { return (b & 0x0F) == 0x05; }
 static bool isSdd1Family(uint8 b) { return (b & 0x0F) == 0x02; }
+static bool isSpc7110Family(uint8 b) {
+  // require valid header top bits (bit5=1, bits7-6=0) to avoid filler 0xEA false positive
+  if ((b & 0xC0) != 0) return false;
+  if ((b & 0x20) == 0) return false;
+  return (b & 0x0F) == 0x0A;
+}
 
 // Raw-image file offset of the given 24-bit address for a map mode, before the
 // copier header is stripped. Returns the 32-bit max (as the "unmapped" marker)
@@ -138,6 +144,8 @@ void Cartridge::detect() {
   if (isExHiRomFamily(byte(exPos))) {
     mapMode_ = MapMode::exhirom;
   } else if (isHiRomFamily(byte(hiPos))) {
+    mapMode_ = MapMode::hirom;
+  } else if (isSpc7110Family(byte(hiPos))) {
     mapMode_ = MapMode::hirom;
   } else if (isLoRomFamily(byte(loPos))) {
     mapMode_ = MapMode::lorom;
