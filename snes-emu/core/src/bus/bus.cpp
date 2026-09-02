@@ -4,6 +4,8 @@
 #include "coprocessor/coprocessor.hpp"
 #include "coprocessor/sdd1.hpp"
 #include "coprocessor/spc7110.hpp"
+#include "coprocessor/sa1.hpp"
+#include "coprocessor/superfx.hpp"
 #include "ppu/ppu.hpp"
 #include "scheduler/scheduler.hpp"
 #include "serialize/serialize.hpp"
@@ -83,6 +85,10 @@ auto Bus::read(uint24 address) -> uint8 {
           auto* spc = static_cast<Spc7110*>(coprocessor_.get());
           if (!spc->sramEnabled()) return lastData_;
         }
+        if (chip_ == Chip::sa1) {
+          // SA-1 BW-RAM at 00-3F/80-BF:6000-7FFF (2KB I-RAM is at 3000, handled via coprocessor)
+          return sramRead(offs, 0x6000);
+        }
         bool hiromBank = (bank >= 0x20 && bank <= 0x3F) || (bank >= 0xA0 && bank <= 0xBF);
         bool exhiromBank = bank >= 0x80 && bank <= 0xBF;
         if ((cartridge_.mapMode() == MapMode::hirom && hiromBank) ||
@@ -92,8 +98,15 @@ auto Bus::read(uint24 address) -> uint8 {
       }
       return lastData_;  // no SRAM -> open bus
     }
+    // SA-1 BW-RAM linear 60-6F / 40-43 handling would be in cartridge windows, but keep here for completeness
     // SPC7110 data ROM windows are handled via romRead mapping, but $50/$58 bypass ROM
     return romRead(address);
+  }
+
+  // SA-1 linear BW-RAM 60-6F:0000-FFFF (before ROM)
+  if (chip_ == Chip::sa1 && !sram_.empty() && bank >= 0x60 && bank <= 0x6F) {
+    uint32 linear = (bank - 0x60) * 0x10000 + offs;
+    return latch(sram_[linear & (sram_.size() - 1)]);
   }
 
   // Cartridge windows.
@@ -143,6 +156,9 @@ void Bus::write(uint24 address, uint8 data) {
           auto* spc = static_cast<Spc7110*>(coprocessor_.get());
           if (!spc->sramEnabled()) return;
         }
+        if (chip_ == Chip::sa1) {
+          return sramWrite(offs, 0x6000, data);
+        }
         bool hiromBank = (bank >= 0x20 && bank <= 0x3F) || (bank >= 0xA0 && bank <= 0xBF);
         bool exhiromBank = bank >= 0x80 && bank <= 0xBF;
         if ((cartridge_.mapMode() == MapMode::hirom && hiromBank) ||
@@ -153,6 +169,13 @@ void Bus::write(uint24 address, uint8 data) {
       return;  // no SRAM -> ignored
     }
     return;  // ROM writes ignored
+  }
+
+  // SA-1 linear BW-RAM write
+  if (chip_ == Chip::sa1 && !sram_.empty() && bank >= 0x60 && bank <= 0x6F) {
+    uint32 linear = (bank - 0x60) * 0x10000 + offs;
+    sram_[linear & (sram_.size() - 1)] = data;
+    return;
   }
 
   switch (cartridge_.mapMode()) {
@@ -184,6 +207,16 @@ uint8 Bus::romRead(uint24 address) {
   if (chip_ == Chip::spc7110 && coprocessor_) {
     auto* spc = static_cast<Spc7110*>(coprocessor_.get());
     uint32 mapped = spc->mapRomAddress(address);
+    if (mapped != UINT32_MAX) {
+      const std::vector<uint8>& rom = cartridge_.rom();
+      if (mapped < rom.size()) return latch(rom[mapped]);
+      if ((rom.size() & (rom.size() - 1)) == 0) return latch(rom[mapped & (rom.size() - 1)]);
+      return lastData_;
+    }
+  }
+  if (chip_ == Chip::sa1 && coprocessor_) {
+    auto* sa1 = static_cast<Sa1*>(coprocessor_.get());
+    uint32 mapped = sa1->mapRomAddress(address);
     if (mapped != UINT32_MAX) {
       const std::vector<uint8>& rom = cartridge_.rom();
       if (mapped < rom.size()) return latch(rom[mapped]);
@@ -589,6 +622,14 @@ auto Bus::hdmaRun() -> void {
   scheduler_.step(cost);
 }
 
+auto Bus::stepSa1() -> void {
+  if (chip_ == Chip::sa1 && coprocessor_) static_cast<Sa1*>(coprocessor_.get())->stepSa1();
+}
+
+auto Bus::stepSuperFx() -> void {
+  if (chip_ == Chip::superfx && coprocessor_) static_cast<SuperFx*>(coprocessor_.get())->stepGsu();
+}
+
 // ---- power / reset ----
 
 void Bus::power() {
@@ -620,6 +661,8 @@ void Bus::power() {
   coprocessor_ = makeCoprocessor(chip_, cartridge_.mapMode());
   if (coprocessor_) {
     coprocessor_->setRom(cartridge_.rom(), cartridge_.mapMode());
+    if (chip_ == Chip::sa1) static_cast<Sa1*>(coprocessor_.get())->setSram(&sram_);
+    if (chip_ == Chip::superfx) static_cast<SuperFx*>(coprocessor_.get())->setSram(&sram_);
     coprocessor_->power();
   }
 }
@@ -716,6 +759,8 @@ auto Bus::deserialize(Reader& r) -> void {
   coprocessor_ = makeCoprocessor(chip_, cartridge_.mapMode());
   if (coprocessor_) {
     coprocessor_->setRom(cartridge_.rom(), cartridge_.mapMode());
+    if (chip_ == Chip::sa1) static_cast<Sa1*>(coprocessor_.get())->setSram(&sram_);
+    if (chip_ == Chip::superfx) static_cast<SuperFx*>(coprocessor_.get())->setSram(&sram_);
     coprocessor_->deserialize(r);
   }
 }

@@ -15,6 +15,8 @@
 //   Cx4     00-3F/80-BF:6000-7FFF          (Mega Man X2/X3, LoROM)
 //   S-DD1   00-3F/80-BF:4800-4807 + hook DMA C0-FF:0000-FFFF (Star Ocean, SFA2)
 //   SPC7110 00-3F/80-BF:4800-4842 + 50:0000-FFFF + HiROM banked D0-FF (FEoEZ, SPL4, MDH)
+//   SA-1     00-3F/80-BF:2200-23FF + 3000-37FF I-RAM + 2220-2223 ROM banking (Kirby, SMRPG)
+//   SuperFX  00-3F/80-BF:3000-32FF + GSU RAM 6000-7FFF/70-71 (Star Fox, Yoshi)
 //
 // Detection is header-driven via the chipset byte $FFD6 (fullsnes
 // "Chipset"): high nibble 5 = S-RTC, 2 = OBC-1, 0 = DSP family. Inside the

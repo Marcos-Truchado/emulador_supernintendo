@@ -1,6 +1,7 @@
 #include "snes/snes.hpp"
 
 #include "../apu/apu.hpp"
+#include "../coprocessor/sa1.hpp"
 #include "../cpu/cpu65816.hpp"
 #include "../ppu/ppu.hpp"
 #include "../scheduler/scheduler.hpp"
@@ -58,6 +59,10 @@ auto System::reset() -> void {
 auto System::step() -> uint64 {
   uint64 cycles = cpu_->execute();
   scheduler_->sync();  // final sync: PPU caught up at instruction boundary
+  if (bus_) {
+    bus_->stepSa1();
+    bus_->stepSuperFx();
+  }
   return cycles;
 }
 

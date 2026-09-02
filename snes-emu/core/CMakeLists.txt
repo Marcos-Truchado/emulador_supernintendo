@@ -12,6 +12,8 @@ add_library(snes_core STATIC
   src/coprocessor/cx4.cpp
   src/coprocessor/sdd1.cpp
   src/coprocessor/spc7110.cpp
+  src/coprocessor/sa1.cpp
+  src/coprocessor/superfx.cpp
   src/system/system.cpp
   src/scheduler/scheduler.cpp
   src/ppu/timing.cpp

@@ -49,7 +49,7 @@ class Writer;
 class Reader;
 class Coprocessor;
 
-enum class Chip : uint8 { none, srtc, obc1, dsp1, dsp3, dsp4, cx4, sdd1, spc7110 };
+enum class Chip : uint8 { none, srtc, obc1, dsp1, dsp3, dsp4, cx4, sdd1, spc7110, sa1, superfx };
 
 enum class MapMode {
   unknown,
@@ -136,6 +136,8 @@ class Bus : public Memory {
   // Phase 5 DMA/HDMA entry points (wired by System via the PPU sinks).
   auto hdmaReset() -> void;  // HDMA table reload (V=0)
   auto hdmaRun() -> void;    // HDMA one-unit transfer per line (HBlank)
+  auto stepSa1() -> void;    // SA-1 second CPU step (no-op if not SA-1)
+  auto stepSuperFx() -> void; // SuperFX GSU step
 
   // ---- save states (phase 7) ----
   auto serialize(Writer& w) const -> void;
