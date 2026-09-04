@@ -359,9 +359,14 @@ void Bus::mmioWrite(uint24 address, uint8 data) {
 }
 
 void Bus::writeCpuRegister(uint8 offset, uint8 data) {
+  uint8 old = cpuReg_[offset];
   cpuReg_[offset] = data;
   switch (offset) {
     case 0x00: ppu_.write4200(data); break;  // NMITIMEN (disabling IRQs acks)
+    case 0x01:  // WRIO: bit7 gates H/V counter latching; a 1->0 edge latches too
+      if ((old & 0x80) && !(data & 0x80)) ppu_.captureCounters();
+      ppu_.setWrio(data);
+      break;
     case 0x02: mpyA_ = data; break;  // WRMPYA
     case 0x03: {                     // WRMPYB: start 8x8 unsigned multiply
       mathResult_ = uint16(mpyA_) * data;
@@ -630,6 +635,12 @@ auto Bus::stepSuperFx() -> void {
   if (chip_ == Chip::superfx && coprocessor_) static_cast<SuperFx*>(coprocessor_.get())->stepGsu();
 }
 
+auto Bus::gsuIrqLevel() const -> bool {
+  if (chip_ == Chip::superfx && coprocessor_)
+    return static_cast<const SuperFx*>(coprocessor_.get())->irqLine();
+  return false;
+}
+
 // ---- power / reset ----
 
 void Bus::power() {
@@ -652,6 +663,7 @@ void Bus::power() {
 
   // Power-on values (fullsnes I/O map right column).
   cpuReg_[0x01] = 0xFF;  // 4201 WRIO
+  ppu_.setWrio(0xFF);
   cpuReg_[0x07] = 0xFF;  // 4207 HTIMEL
   cpuReg_[0x08] = 0x01;  // 4208 HTIMEH
   cpuReg_[0x09] = 0xFF;  // 4209 VTIMEL
@@ -672,6 +684,7 @@ void Bus::reset() {
   // registers (WRIO/HTIME/VTIME) keep whatever the game left in them.
   cpuReg_[0x00] = 0x00;  // 4200 NMITIMEN (disables NMI/IRQ/joypad)
   cpuReg_[0x01] = 0xFF;  // 4201 WRIO
+  ppu_.setWrio(0xFF);
   cpuReg_[0x0B] = 0x00;  // 420B MDMAEN
   cpuReg_[0x0C] = 0x00;  // 420C HDMAEN
   cpuReg_[0x0D] = 0x00;  // 420D MEMSEL

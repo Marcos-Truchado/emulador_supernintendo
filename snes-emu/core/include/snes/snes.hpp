@@ -138,6 +138,7 @@ class Bus : public Memory {
   auto hdmaRun() -> void;    // HDMA one-unit transfer per line (HBlank)
   auto stepSa1() -> void;    // SA-1 second CPU step (no-op if not SA-1)
   auto stepSuperFx() -> void; // SuperFX GSU step
+  auto gsuIrqLevel() const -> bool; // GSU STOP IRQ line (no-op if not SuperFX)
 
   // ---- save states (phase 7) ----
   auto serialize(Writer& w) const -> void;
@@ -238,13 +239,14 @@ class System {
   auto pixelColor(int x, int y) const -> uint16;  // RGB555 (bit15 = bright)
   auto renderedFrames() const -> uint64;  // PPU frame counter (frame pacing)
 
- private:
-  std::unique_ptr<Cartridge> cartridge_;
-  std::unique_ptr<Ppu> ppu_;
-  std::unique_ptr<Apu> apu_;
-  std::unique_ptr<Scheduler> scheduler_;
-  std::unique_ptr<Bus> bus_;
-  std::unique_ptr<Cpu65816> cpu_;
+  private:
+   std::unique_ptr<Cartridge> cartridge_;
+   std::unique_ptr<Ppu> ppu_;
+   std::unique_ptr<Apu> apu_;
+   std::unique_ptr<Scheduler> scheduler_;
+   std::unique_ptr<Bus> bus_;
+   std::unique_ptr<Cpu65816> cpu_;
+   bool ppuIrq_ = false;  // last PPU IRQ pin level (OR with GSU IRQ)
 };
 
 }  // namespace snes

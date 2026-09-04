@@ -25,8 +25,12 @@ System::System() : cartridge_(std::make_unique<Cartridge>()),
                     cpu_(std::make_unique<Cpu65816>(*bus_, *scheduler_)) {
   // Phase 3b: PPU owns the 65816 interrupt semantics (NMI edge-detect,
   // IRQ level) and drives the CPU's external pins through these sinks.
+  // The GSU STOP IRQ shares the CPU IRQ pin (OR level with the PPU).
   ppu_->setNmiPin([this](bool value) { cpu_->setNmi(value); });
-  ppu_->setIrqPin([this](bool value) { cpu_->setIrq(value); });
+  ppu_->setIrqPin([this](bool value) {
+    ppuIrq_ = value;
+    cpu_->setIrq(value || (bus_ && bus_->gsuIrqLevel()));
+  });
   // Phase 5: PPU frame-start / HBlank events drive the DMA/HDMA engine.
   ppu_->setFrameStartSink([this]() { bus_->hdmaReset(); });
   ppu_->setHblankSink([this]() { bus_->hdmaRun(); });
@@ -62,6 +66,7 @@ auto System::step() -> uint64 {
   if (bus_) {
     bus_->stepSa1();
     bus_->stepSuperFx();
+    cpu_->setIrq(ppuIrq_ || bus_->gsuIrqLevel());
   }
   return cycles;
 }

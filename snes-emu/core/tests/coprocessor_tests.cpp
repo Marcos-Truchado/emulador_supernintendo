@@ -9,6 +9,7 @@
 #include "coprocessor/dsp1.hpp"
 #include "coprocessor/dsp3.hpp"
 #include "coprocessor/dsp4.hpp"
+#include "coprocessor/superfx.hpp"
 
 using namespace snes;
 
@@ -426,4 +427,732 @@ TEST_CASE("bus: coprocessor routing does not affect plain carts") {
   System sys;
   // System::load would re-detect; instead just check detectChip directly
   CHECK(detectChip(cart) == Chip::none);
+}
+
+// ---- SuperFX GSU (snes9x fxinst/fxemu faithful PLOT path) ----
+
+static void sfxSetReg(SuperFx& sfx, int r, uint16 v) {
+  sfx.write(0x003000 + r * 2, uint8(v & 0xFF));
+  sfx.write(0x003000 + r * 2 + 1, uint8(v >> 8));
+}
+
+TEST_CASE("superfx: power zeroes RAM (no HLE checker) and VCR=GSU2") {
+  SuperFx sfx;
+  sfx.power();
+  CHECK(sfx.read(0x00303B) == 0x04); // VCR
+  CHECK(sfx.read(0x00700000) == 0x00);
+  CHECK(sfx.read(0x00700001) == 0x00);
+  CHECK(sfx.read(0x003030) == 0x00); // SFR lo (GO=0)
+  CHECK((sfx.read(0x003031) & 0x80) == 0x00); // IRQ=0
+}
+
+TEST_CASE("superfx: STOP clears GO (0x20) and sets IRQ (0x8000)") {
+  SuperFx sfx;
+  std::vector<uint8> rom(0x10000, 0x01); // NOP fill
+  rom[0] = 0x00; // STOP
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18); // SCMR: RAN|RON so the session validates
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00); // R15 MSB -> GO=1
+  CHECK((sfx.read(0x003030) & 0x20) != 0); // GO set
+  for (int i = 0; i < 10; i++) sfx.stepGsu();
+  CHECK((sfx.read(0x003030) & 0x20) == 0); // GO cleared by STOP
+  CHECK((sfx.read(0x003031) & 0x80) != 0); // IRQ set
+}
+
+TEST_CASE("superfx: COLOR+PLOT 4-color writes pixel to screen base") {
+  SuperFx sfx;
+  // program: COLOR, PLOT, STOP
+  std::vector<uint8> rom(0x10000, 0x01);
+  rom[0] = 0x4E; rom[1] = 0x4C; rom[2] = 0x00;
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x003038, 0x00); // SCBR=0
+  sfx.write(0x00303A, 0x18); // SCMR mode0 128px + RAN|RON
+  sfxSetReg(sfx, 0, 0x0001); // R0=color 1
+  sfxSetReg(sfx, 1, 0x0000); // R1=x
+  sfxSetReg(sfx, 2, 0x0000); // R2=y
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 20; i++) sfx.stepGsu();
+  // 4-color mode tile0: plane0 at base+0, bit7 (x=0 -> 128>>0)
+  CHECK(sfx.read(0x00700000) == 0x80);
+  CHECK(sfx.read(0x00700001) == 0x00);
+}
+
+TEST_CASE("superfx: RPIX reads back plotted pixel") {
+  SuperFx sfx;
+  // program: ALT1+RPIX, STOP. Pre-fill screen RAM so (0,0) plane0 bit7=1.
+  std::vector<uint8> rom(0x10000, 0x01);
+  rom[0] = 0x3D; rom[1] = 0x4C; rom[2] = 0x00;
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x003038, 0x00);
+  sfx.write(0x00303A, 0x18); // mode0 + RAN|RON
+  sfx.write(0x00700000, 0x80); // plane0 x=0
+  sfx.write(0x00700001, 0x00);
+  sfxSetReg(sfx, 1, 0x0000);
+  sfxSetReg(sfx, 2, 0x0000);
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 30; i++) sfx.stepGsu();
+  uint16 r0 = uint16(sfx.read(0x003000)) | (uint16(sfx.read(0x003001)) << 8);
+  CHECK(r0 == 0x0001);
+}
+
+TEST_CASE("superfx: CACHE sets CBR=R15&FFF0 and CMODE sets POR/height") {
+  SuperFx sfx;
+  // program at 0x120: CACHE, ALT1, CMODE (SREG=R0=0x10 OBJ), STOP
+  std::vector<uint8> rom(0x10000, 0x01);
+  rom[0x120] = 0x02; rom[0x121] = 0x3D; rom[0x122] = 0x4E; rom[0x123] = 0x00;
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18); // RAN|RON for session validation
+  sfxSetReg(sfx, 0, 0x0010);
+  sfxSetReg(sfx, 15, 0x0120);
+  sfx.write(0x00301F, 0x01); // R15=0x0120 (MSB=0x01) -> GO
+  for (int i = 0; i < 20; i++) sfx.stepGsu();
+  CHECK(sfx.read(0x00303E) == 0x20);
+  CHECK(sfx.read(0x00303F) == 0x01);
+}
+
+// ---- SuperFX full GSU table (snes9x fxinst.cpp transliteration) ----
+
+static void sfxRun(SuperFx& sfx, std::vector<uint8> rom) {
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18); // RAN|RON
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 40; i++) sfx.stepGsu();
+}
+
+static uint16 sfxReg(SuperFx& sfx, int r) {
+  return uint16(sfx.read(uint24(0x003000 + r * 2))) |
+         (uint16(sfx.read(uint24(0x003000 + r * 2 + 1))) << 8);
+}
+
+TEST_CASE("superfx: WITH+ADD uses SREG/DREG selection") {
+  SuperFx sfx;
+  std::vector<uint8> rom(0x10000, 0x01);
+  rom[0] = 0x23; rom[1] = 0x53; rom[2] = 0x00; // WITH R3, ADD R3, STOP
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18);
+  sfxSetReg(sfx, 3, 7);
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 20; i++) sfx.stepGsu();
+  CHECK(sfxReg(sfx, 3) == 14);
+}
+
+TEST_CASE("superfx: SUB sets Z + BEQ taken skips over NOP delay") {
+  SuperFx sfx;
+  // B1 62 | 09 04 | 01 | A0 63 | 00 | A0 07 | 00
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xB1, 0x62, 0x09, 0x04, 0x01, 0xA0, 0x63, 0x00, 0xA0, 0x07, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18);
+  sfxSetReg(sfx, 1, 5);
+  sfxSetReg(sfx, 2, 5); // equal -> Z=1 -> BEQ taken -> R0=7
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 30; i++) sfx.stepGsu();
+  CHECK(sfxReg(sfx, 0) == 7);
+
+  SuperFx sfx2; // not taken path -> R0=99
+  sfx2.setRom(rom, MapMode::lorom);
+  sfx2.power();
+  sfx2.write(0x00303A, 0x18);
+  sfxSetReg(sfx2, 1, 5);
+  sfxSetReg(sfx2, 2, 3);
+  sfxSetReg(sfx2, 15, 0x0000);
+  sfx2.write(0x00301F, 0x00);
+  for (int i = 0; i < 30; i++) sfx2.stepGsu();
+  CHECK(sfxReg(sfx2, 0) == 99);
+}
+
+TEST_CASE("superfx: LOOP iterates R12 times with delay NOP") {
+  SuperFx sfx;
+  // A0 00 | AC 03 | AD 06 | D0 | 3C | 01 | 00
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xA0, 0x00, 0xAC, 0x03, 0xAD, 0x06, 0xD0, 0x3C, 0x01, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfxRun(sfx, std::move(rom));
+  CHECK(sfxReg(sfx, 0) == 3);
+  CHECK(sfxReg(sfx, 12) == 0);
+}
+
+TEST_CASE("superfx: JMP executes delay-slot IBT before landing") {
+  SuperFx sfx;
+  // A8 09 | 98 | A0 07 | A0 63 | A0 63 | 00
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xA8, 0x09, 0x98, 0xA0, 0x07, 0xA0, 0x63, 0xA0, 0x63, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfxRun(sfx, std::move(rom));
+  CHECK(sfxReg(sfx, 0) == 7); // delay IBT ran; skipped bytes never ran
+}
+
+TEST_CASE("superfx: LJMP switches PBR + LINK saves return") {
+  SuperFx sfx;
+  // B1 | 3D 98 | 01 | A0 63 | 00 ; R1=5 dest, R8=0 bank
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xB1, 0x3D, 0x98, 0x01, 0xA0, 0x63, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18);
+  sfxSetReg(sfx, 1, 6);
+  sfxSetReg(sfx, 8, 0);
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 30; i++) sfx.stepGsu();
+  CHECK(sfxReg(sfx, 0) == 0); // skipped IBT never ran
+  CHECK(sfx.read(0x00303E) == 0x00); // LJMP reset CBR to dest&FFF0
+
+  SuperFx sfx2; // LINK 1 at 0 -> R11 = 1+1 = 2
+  std::vector<uint8> rom2(0x10000, 0x01);
+  rom2[0] = 0x91; rom2[1] = 0x00;
+  sfxRun(sfx2, std::move(rom2));
+  CHECK(sfxReg(sfx2, 11) == 2);
+}
+
+TEST_CASE("superfx: IBT sign-extends, IWT loads little-endian") {
+  SuperFx sfx;
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xA0, 0xFF, 0xF1, 0x34, 0x12, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfxRun(sfx, std::move(rom));
+  CHECK(sfxReg(sfx, 0) == 0xFFFF);
+  CHECK(sfxReg(sfx, 1) == 0x1234);
+}
+
+TEST_CASE("superfx: LM/SM round-trip + SBK uses last RAM address") {
+  SuperFx sfx;
+  // 3D F0 00 01 (LM R0,0x100) | 3E F0 00 02 (SM 0x200,R0) | A0 77 | 90 (SBK) | 00
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0x3D, 0xF0, 0x00, 0x01, 0x3E, 0xF0, 0x00, 0x02, 0xA0, 0x77, 0x90, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18);
+  sfx.write(0x00700100, 0x34);
+  sfx.write(0x00700101, 0x12);
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 40; i++) sfx.stepGsu();
+  CHECK(sfxReg(sfx, 0) == 0x0077); // IBT overwrote R0 after LM
+  CHECK(sfx.read(0x00700200) == 0x77); // SBK rewrote low byte of last addr
+  CHECK(sfx.read(0x00700201) == 0x00);
+}
+
+TEST_CASE("superfx: LMS/SMS short-address RAM access") {
+  SuperFx sfx;
+  // 3D A0 80 (LMS R0,0x80->0x100) | 3E A0 90 (SMS 0x90->0x120,R0) | 00
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0x3D, 0xA0, 0x80, 0x3E, 0xA0, 0x90, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18);
+  sfx.write(0x00700100, 0xCD);
+  sfx.write(0x00700101, 0xAB);
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 40; i++) sfx.stepGsu();
+  CHECK(sfxReg(sfx, 0) == 0xABCD);
+  CHECK(sfx.read(0x00700120) == 0xCD);
+  CHECK(sfx.read(0x00700121) == 0xAB);
+}
+
+TEST_CASE("superfx: LDW/STW/LDB/STB via register pointers") {
+  SuperFx sfx;
+  // F5 00 01 (IWT R5,0x100) | B1 (FROM R1) | 35 (STW R5) | 3D 45 (LDB R5) | 00
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xF5, 0x00, 0x01, 0xB1, 0x35, 0x3D, 0x45, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18);
+  sfxSetReg(sfx, 1, 0xABCD);
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 40; i++) sfx.stepGsu();
+  CHECK(sfx.read(0x00700100) == 0xCD);
+  CHECK(sfx.read(0x00700101) == 0xAB);
+  CHECK(sfxReg(sfx, 0) == 0x00CD); // LDB zero-extends
+}
+
+TEST_CASE("superfx: GETB/H/L/S + ROMB bank switch") {
+  // GETB/GETBH with rom[0x10]=0xAB, R0=0x12 preset
+  {
+    SuperFx sfx;
+    std::vector<uint8> rom(0x10000, 0x01);
+    rom[0x10] = 0xAB;
+    uint8 prog[] = {0xA0, 0x12, 0x3D, 0xEF, 0x00}; // IBT R0,12 | GETBH | STOP
+    for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+    sfx.setRom(rom, MapMode::lorom);
+    sfx.power();
+    sfx.write(0x00303A, 0x18);
+    sfxSetReg(sfx, 14, 0x0010);
+    sfxSetReg(sfx, 15, 0x0000);
+    sfx.write(0x00301F, 0x00);
+    for (int i = 0; i < 30; i++) sfx.stepGsu();
+    CHECK(sfxReg(sfx, 0) == 0xAB12);
+  }
+  // GETBL + GETBS
+  {
+    SuperFx sfx;
+    std::vector<uint8> rom(0x10000, 0x01);
+    rom[0x10] = 0xAB;
+    uint8 prog[] = {0xF0, 0x00, 0x12, 0x3E, 0xEF, 0x00}; // IWT R0,1200 | GETBL | STOP
+    for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+    sfx.setRom(rom, MapMode::lorom);
+    sfx.power();
+    sfx.write(0x00303A, 0x18);
+    sfxSetReg(sfx, 14, 0x0010);
+    sfxSetReg(sfx, 15, 0x0000);
+    sfx.write(0x00301F, 0x00);
+    for (int i = 0; i < 30; i++) sfx.stepGsu();
+    CHECK(sfxReg(sfx, 0) == 0x12AB);
+  }
+  {
+    SuperFx sfx;
+    std::vector<uint8> rom(0x10000, 0x01);
+    rom[0x10] = 0xAB;
+    uint8 prog[] = {0x3F, 0xEF, 0x00}; // GETBS | STOP
+    for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+    sfx.setRom(rom, MapMode::lorom);
+    sfx.power();
+    sfx.write(0x00303A, 0x18);
+    sfxSetReg(sfx, 14, 0x0010);
+    sfxSetReg(sfx, 15, 0x0000);
+    sfx.write(0x00301F, 0x00);
+    for (int i = 0; i < 30; i++) sfx.stepGsu();
+    CHECK(sfxReg(sfx, 0) == 0xFFAB);
+  }
+  // ROMB to bank 0x40 (HiROM mirror, unambiguous 64KB stride)
+  {
+    SuperFx sfx;
+    std::vector<uint8> rom(0x20000, 0x01);
+    rom[0x10] = 0x77;
+    uint8 prog[] = {0xA1, 0x40, 0xB1, 0x3F, 0xDF, 0xFE, 0x10, 0x00, 0xEF, 0x00};
+    for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+    sfx.setRom(rom, MapMode::lorom);
+    sfx.power();
+    sfx.write(0x00303A, 0x18);
+    sfxSetReg(sfx, 15, 0x0000);
+    sfx.write(0x00301F, 0x00);
+    for (int i = 0; i < 40; i++) sfx.stepGsu();
+    CHECK(sfxReg(sfx, 0) == 0x0077);
+    CHECK(sfx.read(0x003036) == 0x40);
+  }
+}
+
+TEST_CASE("superfx: INC/DEC R14 does not refill ROM buffer (stale GETB)") {
+  // HW/snes9x: ROM buffer refills on explicit R14 sets (IWT/LM/TO) but NOT
+  // on INC/DEC, so GETB after INC reads the previous byte (stale).
+  // FE 00 01 (IWT R14,#0x100; refills buf=ROM[0x100]=0xAA) | EF (GETB R0=0xAA)
+  // | DE (INC R14 -> 0x101, NO refill) | EF (GETB still 0xAA, not ROM[0x101]=0xBB) | 00
+  SuperFx sfx;
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xFE, 0x00, 0x01, 0xEF, 0xDE, 0xEF, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  rom[0x100] = 0xAA;
+  rom[0x101] = 0xBB;
+  sfxRun(sfx, std::move(rom));
+  CHECK(sfxReg(sfx, 0) == 0x00AA);
+}
+
+TEST_CASE("superfx: MERGE texture interleave + flags") {
+  SuperFx sfx;
+  // F7 00 AB (R7=AB00) | F8 34 12 (R8=1234) | 70 (MERGE) | 00
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xF7, 0x00, 0xAB, 0xF8, 0x34, 0x12, 0x70, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfxRun(sfx, std::move(rom));
+  CHECK(sfxReg(sfx, 0) == 0xAB12);
+  uint8 sfr = sfx.read(0x003030);
+  CHECK((sfr & 0x08) != 0); // S
+  CHECK((sfr & 0x02) != 0); // Z (fullsnes MERGE: set iff (v&F0F0)!=0; AB12&A010!=0 -> Z=1)
+  CHECK((sfr & 0x10) != 0); // OV
+  CHECK((sfr & 0x04) != 0); // CY
+
+  // Z clear when the F0F0 mask is zero (e.g. R7=0x0000,R8=0x0000 -> v=0x0000)
+  SuperFx sfxZ;
+  std::vector<uint8> romZ(0x10000, 0x01);
+  uint8 progZ[] = {0xF7, 0x00, 0x00, 0xF8, 0x00, 0x00, 0x70, 0x00};
+  for (size_t i = 0; i < sizeof progZ; i++) romZ[i] = progZ[i];
+  sfxRun(sfxZ, std::move(romZ));
+  CHECK(sfxReg(sfxZ, 0) == 0x0000);
+  CHECK((sfxZ.read(0x003030) & 0x02) == 0); // Z=0 when (v & 0xF0F0)==0
+}
+
+TEST_CASE("superfx: MULT signed vs UMULT unsigned") {
+  SuperFx sfx;
+  // F1 FF FF (R1=FFFF=-1) | F2 03 00 (R2=3) | 21 (WITH R1) | 82 (MULT R2 -> FFFD)
+  // | 21 (WITH R1 again: prefixes reset after MULT) | 3D 82 (UMULT: FD*3=2F7) | 00
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xF1, 0xFF, 0xFF, 0xF2, 0x03, 0x00, 0x21, 0x82, 0x21, 0x3D, 0x82, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfxRun(sfx, std::move(rom));
+  CHECK(sfxReg(sfx, 1) == 0x02F7);
+}
+
+TEST_CASE("superfx: FMULT high word + LMULT low word to R4") {
+  SuperFx sfx;
+  // F1 00 40 (R1=4000) | F6 00 40 (R6=4000) | B1 (FROM R1) | 9F (FMULT -> R0=1000)
+  // | B1 (FROM R1 again) | 3D 9F (LMULT -> R4=0000,R0=1000) | 00
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xF1, 0x00, 0x40, 0xF6, 0x00, 0x40, 0xB1, 0x9F, 0xB1, 0x3D, 0x9F, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfxRun(sfx, std::move(rom));
+  CHECK(sfxReg(sfx, 0) == 0x1000);
+  CHECK(sfxReg(sfx, 4) == 0x0000);
+}
+
+TEST_CASE("superfx: SWAP/SEX/LOB/HIB byte ops") {
+  SuperFx sfx;
+  // F0 34 12 (R0=1234) | 4D (SWAP->3412) | 9E (LOB->12) | C0 (HIB->00) | 00
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xF0, 0x34, 0x12, 0x4D, 0x9E, 0xC0, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfxRun(sfx, std::move(rom));
+  CHECK(sfxReg(sfx, 0) == 0x0000);
+
+  SuperFx sfx2;
+  std::vector<uint8> rom2(0x10000, 0x01);
+  uint8 prog2[] = {0xF0, 0x80, 0x00, 0x95, 0x00}; // IWT R0,80 | SEX -> FF80
+  for (size_t i = 0; i < sizeof prog2; i++) rom2[i] = prog2[i];
+  sfxRun(sfx2, std::move(rom2));
+  CHECK(sfxReg(sfx2, 0) == 0xFF80);
+}
+
+TEST_CASE("superfx: ASR/ROR/DIV2/INC/DEC shift chain") {
+  SuperFx sfx;
+  // F0 03 00 | 97 | 97 | 96 | 3D 96 | D0 | E0 | 00
+  // R0=3 ->ROR(CY0)->1,CY1 ->ROR->8000 ->ASR->C000 ->DIV2->E000 ->INC->E001 ->DEC->E000
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xF0, 0x03, 0x00, 0x97, 0x97, 0x96, 0x3D, 0x96, 0xD0, 0xE0, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfxRun(sfx, std::move(rom));
+  CHECK(sfxReg(sfx, 0) == 0xE000);
+  uint8 sfr = sfx.read(0x003030);
+  CHECK((sfr & 0x08) != 0); // S
+  CHECK((sfr & 0x04) == 0); // CY (DIV2 of C000 is even)
+}
+
+TEST_CASE("superfx: branch preserves TO prefix for delay-slot ADD") {
+  SuperFx sfx;
+  // Case-4 split (fullsnes): TO R5 | BEQ +1 | ADD R5(delay, uses DREG=R5) | STOP
+  // A5 0A | B1 | 61 | 15 | 09 01 | 55 | 00
+  // R5=10, SUB R1,R1 (R0=0,Z=1), TO R5, BEQ taken -> delay ADD R5: R5=R0+R5=10
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xA5, 0x0A, 0xB1, 0x61, 0x15, 0x09, 0x01, 0x55, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18);
+  sfxSetReg(sfx, 1, 3);
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 40; i++) sfx.stepGsu();
+  CHECK(sfxReg(sfx, 5) == 10); // DREG was R5
+  CHECK(sfxReg(sfx, 0) == 0);  // R0 untouched proves prefix survived
+}
+
+TEST_CASE("superfx: RAMB/ROMB bank registers + mode-2 PLOT is 4-bit") {
+  SuperFx sfx;
+  // A0 02 | 3E DF (RAMB) | A0 03 | 3F DF (ROMB) | 00 ; SREG=R0 default
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xA0, 0x02, 0x3E, 0xDF, 0xA0, 0x03, 0x3F, 0xDF, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfxRun(sfx, std::move(rom));
+  CHECK(sfx.read(0x00303C) == 0x02);
+  CHECK(sfx.read(0x003036) == 0x03);
+
+  SuperFx sfx2; // mode 2 (0x1A) plots 4 planes like mode 1
+  std::vector<uint8> rom2(0x10000, 0x01);
+  rom2[0] = 0x4E; rom2[1] = 0x4C; rom2[2] = 0x00;
+  sfx2.setRom(rom2, MapMode::lorom);
+  sfx2.power();
+  sfx2.write(0x003038, 0x00);
+  sfx2.write(0x00303A, 0x1A); // mode2 + RAN|RON
+  sfxSetReg(sfx2, 0, 0x0005);
+  sfxSetReg(sfx2, 1, 0x0000);
+  sfxSetReg(sfx2, 2, 0x0000);
+  sfxSetReg(sfx2, 15, 0x0000);
+  sfx2.write(0x00301F, 0x00);
+  for (int i = 0; i < 20; i++) sfx2.stepGsu();
+  CHECK(sfx2.read(0x00700000) == 0x80);
+  CHECK(sfx2.read(0x00700010) == 0x80);
+}
+
+TEST_CASE("superfx: CACHE sets CBR=R15&FFF0 and CMODE sets POR/height") {
+  SuperFx sfx;
+  // program at 0x120: CACHE, ALT1, CMODE (SREG=R0=0x10 OBJ), STOP
+  std::vector<uint8> rom(0x10000, 0x01);
+  rom[0x120] = 0x02; rom[0x121] = 0x3D; rom[0x122] = 0x4E; rom[0x123] = 0x00;
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18); // RAN|RON for session validation
+  sfxSetReg(sfx, 0, 0x0010);
+  sfxSetReg(sfx, 15, 0x0120);
+  sfx.write(0x00301F, 0x01); // R15=0x0120 (MSB=0x01) -> GO
+  for (int i = 0; i < 20; i++) sfx.stepGsu();
+  CHECK(sfx.read(0x00303E) == 0x20);
+  CHECK(sfx.read(0x00303F) == 0x01);
+}
+
+TEST_CASE("superfx: CMP/ADC/SBC carry+zero drive branches") {
+  SuperFx sfx;
+  // B1 FROM R1 | 3F 61 CMP R1 (R0==R1? Z=1 CY=1) | 09 04 BEQ+4 | 01 NOP delay
+  // | A0 63 | 00 STOP | A0 07 | 00
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xB1, 0x3F, 0x61, 0x09, 0x04, 0x01, 0xA0, 0x63, 0x00, 0xA0, 0x07, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18);
+  sfxSetReg(sfx, 0, 0x1234);
+  sfxSetReg(sfx, 1, 0x1234); // equal -> CMP sets Z,CY
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 30; i++) sfx.stepGsu();
+  CHECK(sfxReg(sfx, 0) == 0x0007); // BEQ taken: skipped IBT 0x63, ran IBT 7
+}
+
+TEST_CASE("superfx: ADC adds carry, SBC borrows inverted carry") {
+  SuperFx sfx;
+  // R0=0xFFFF, R1=1: WITH R0? use: B0 FROM R0 | 3D 51 ADC R1 (FFFF+1+CY?)
+  // CY preset via SFR write: set CY bit then ADC
+  std::vector<uint8> rom(0x10000, 0x01);
+  // B0 | 3D 51 | 00 : FROM R0, ADC R1, STOP
+  uint8 prog[] = {0xB0, 0x3D, 0x51, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18);
+  sfxSetReg(sfx, 0, 0x0001);
+  sfxSetReg(sfx, 1, 0x0002);
+  // preset CY=1 via SFR low write (bit2) -- GO must stay 0 (bit5=0)
+  sfx.write(0x003030, 0x04);
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 20; i++) sfx.stepGsu();
+  // ADC: R0 = R0+R1+CY = 1+2+1 = 4
+  CHECK(sfxReg(sfx, 0) == 0x0004);
+
+  SuperFx sfx2; // SBC: R0=5,R1=2,CY=1 -> 5-2-0=3
+  std::vector<uint8> rom2(0x10000, 0x01);
+  uint8 prog2[] = {0xB0, 0x3D, 0x61, 0x00}; // FROM R0, SBC R1, STOP
+  for (size_t i = 0; i < sizeof prog2; i++) rom2[i] = prog2[i];
+  sfx2.setRom(rom2, MapMode::lorom);
+  sfx2.power();
+  sfx2.write(0x00303A, 0x18);
+  sfxSetReg(sfx2, 0, 0x0005);
+  sfxSetReg(sfx2, 1, 0x0002);
+  sfx2.write(0x003030, 0x04); // CY=1 -> borrow 0
+  sfxSetReg(sfx2, 15, 0x0000);
+  sfx2.write(0x00301F, 0x00);
+  for (int i = 0; i < 20; i++) sfx2.stepGsu();
+  CHECK(sfxReg(sfx2, 0) == 0x0003);
+}
+
+TEST_CASE("superfx: ADD_I/SUB_I immediates + BGE/BLT signed branches") {
+  SuperFx sfx;
+  // R0=0x8000 (negative), R1=0: WITH/B? use FROM R0, SUB R1 -> S=1,OV=0 -> BLT taken
+  // B0 | 61 | 07 04 | 01 | A0 63 | 00 | A0 07 | 00
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xB0, 0x61, 0x07, 0x04, 0x01, 0xA0, 0x63, 0x00, 0xA0, 0x07, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18);
+  sfxSetReg(sfx, 0, 0x8000);
+  sfxSetReg(sfx, 1, 0x0000);
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 30; i++) sfx.stepGsu();
+  // SUB: R0 = 8000-0 = 8000, S=1, OV=0 -> BLT (S!=OV) taken -> R0=7
+  CHECK(sfxReg(sfx, 0) == 0x0007);
+
+  SuperFx sfx2; // ADD #n: R0=5, ALT2 ADD #3 -> R0=8
+  std::vector<uint8> rom2(0x10000, 0x01);
+  uint8 prog2[] = {0x3E, 0x53, 0x00}; // ALT2, ADD #3, STOP (SREG=R0)
+  for (size_t i = 0; i < sizeof prog2; i++) rom2[i] = prog2[i];
+  sfx2.setRom(rom2, MapMode::lorom);
+  sfx2.power();
+  sfx2.write(0x00303A, 0x18);
+  sfxSetReg(sfx2, 0, 0x0005);
+  sfxSetReg(sfx2, 15, 0x0000);
+  sfx2.write(0x00301F, 0x00);
+  for (int i = 0; i < 20; i++) sfx2.stepGsu();
+  CHECK(sfxReg(sfx2, 0) == 0x0008);
+}
+
+TEST_CASE("superfx: LSR/ROL carry round-trip") {
+  SuperFx sfx;
+  // R0=0x8003: LSR -> R0=0x4001 CY=1; ROL -> R0=0x8003 CY=0? (0x4001<<1|1=0x8003, CY=(0x4001>>15)=0)
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0x03, 0x04, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18);
+  sfxSetReg(sfx, 0, 0x8003);
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 20; i++) sfx.stepGsu();
+  CHECK(sfxReg(sfx, 0) == 0x8003);
+  CHECK((sfx.read(0x003030) & 0x04) == 0); // CY=0
+}
+
+TEST_CASE("superfx: OR/XOR/AND/BIC with registers and immediates") {
+  SuperFx sfx;
+  // R0=0xFF00, R1=0x0FF0:
+  // WITH R0? OR needs SREG: B0 FROM R0 | C1 OR R1 -> R0 = FF00|0FF0 = FFF0
+  // | 3D C2 XOR R2 (R2=0xFFFF) -> R0 = FFF0^FFFF = 000F, Z=0
+  // | 3E 73 AND #3 -> R0 = 000F&3 = 3 | 00
+  std::vector<uint8> rom(0x10000, 0x01);
+  uint8 prog[] = {0xB0, 0xC1, 0x3D, 0xC2, 0x3E, 0x73, 0x00};
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x00303A, 0x18);
+  sfxSetReg(sfx, 0, 0xFF00);
+  sfxSetReg(sfx, 1, 0x0FF0);
+  sfxSetReg(sfx, 2, 0xFFFF);
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 30; i++) sfx.stepGsu();
+  // NOTE: prefixes reset after each op, so XOR/AND use SREG=R0 (chained):
+  // OR: R0=FFF0. XOR needs SREG=R0 -> must re-FROM! Without it SREG=R0 anyway (reset default).
+  // DREG also resets to R0. So chain works on R0.
+  CHECK(sfxReg(sfx, 0) == 0x0003);
+}
+
+TEST_CASE("superfx: GETC transfers ROM buffer to COLR + STB stores byte") {
+  SuperFx sfx;
+  // rom[0x20]=0x5A: IWT R14,0x20 (FE 20 00) | DF GETC -> COLR=5A
+  // | 4E COLOR? no: PLOT needs R1/R2: set R1=0,R2=0 via SNES, PLOT mode0: RAM[0]=0x80? color 5A bit0=0? 5A=01011010 bit0=0 -> plane0 CLEAR stays 0!
+  // simpler: check COLR effect via PLOT with color 0x03: use IBT R0,3 + COLOR? GETC path:
+  std::vector<uint8> rom(0x10000, 0x01);
+  rom[0x20] = 0x03;
+  uint8 prog[] = {0xFE, 0x20, 0x00, 0xDF, 0x4C, 0x00}; // IWT R14 | GETC | PLOT | STOP
+  for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x003038, 0x00);
+  sfx.write(0x00303A, 0x18);
+  sfxSetReg(sfx, 1, 0x0000);
+  sfxSetReg(sfx, 2, 0x0000);
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 30; i++) sfx.stepGsu();
+  CHECK(sfx.read(0x00700000) == 0x80); // color 3 bit0 set
+  CHECK(sfx.read(0x00700001) == 0x80); // color 3 bit1 set
+
+  SuperFx sfx2; // STB: R5=0x300, SREG=R1=0xAB -> RAM[300]=AB
+  std::vector<uint8> rom2(0x10000, 0x01);
+  uint8 prog2[] = {0xB1, 0x3D, 0x35, 0x00}; // FROM R1 | STB R5 | STOP
+  for (size_t i = 0; i < sizeof prog2; i++) rom2[i] = prog2[i];
+  sfx2.setRom(rom2, MapMode::lorom);
+  sfx2.power();
+  sfx2.write(0x00303A, 0x18);
+  sfxSetReg(sfx2, 1, 0xAB);
+  sfxSetReg(sfx2, 5, 0x0300);
+  sfxSetReg(sfx2, 15, 0x0000);
+  sfx2.write(0x00301F, 0x00);
+  for (int i = 0; i < 20; i++) sfx2.stepGsu();
+  CHECK(sfx2.read(0x00700300) == 0xAB);
+}
+
+TEST_CASE("superfx: RPIX 4-bit and 8-bit + PLOT 8-bit") {
+  SuperFx sfx;
+  // 16-color: SCBR0 SCMR=0x19 (mode1+RANRON). PLOT color 0x0A at (0,0)
+  std::vector<uint8> rom(0x10000, 0x01);
+  rom[0] = 0x4E; rom[1] = 0x4C; rom[2] = 0x3D; rom[3] = 0x4C; rom[4] = 0x00;
+  sfx.setRom(rom, MapMode::lorom);
+  sfx.power();
+  sfx.write(0x003038, 0x00);
+  sfx.write(0x00303A, 0x19);
+  sfxSetReg(sfx, 0, 0x000A);
+  sfxSetReg(sfx, 1, 0x0000);
+  sfxSetReg(sfx, 2, 0x0000);
+  sfxSetReg(sfx, 15, 0x0000);
+  sfx.write(0x00301F, 0x00);
+  for (int i = 0; i < 30; i++) sfx.stepGsu();
+  // color A=1010: planes 1,3 set at bit7; R1 advanced to 1 so RPIX reads x=1 (empty=0)
+  // RPIX result goes to R0 (default DREG): expect 0
+  CHECK(sfxReg(sfx, 0) == 0x0000);
+  CHECK(sfx.read(0x00700000) == 0x00); // plane0 clear
+  CHECK(sfx.read(0x00700001) == 0x80); // plane1 set
+  CHECK(sfx.read(0x00700010) == 0x00); // plane2 clear
+  CHECK(sfx.read(0x00700011) == 0x80); // plane3 set
+
+  SuperFx sfx2; // 8-bit PLOT color 0x81 at (0,0), SCBR0 SCMR=0x1B (mode3)
+  std::vector<uint8> rom2(0x10000, 0x01);
+  rom2[0] = 0x4E; rom2[1] = 0x4C; rom2[2] = 0x00;
+  sfx2.setRom(rom2, MapMode::lorom);
+  sfx2.power();
+  sfx2.write(0x003038, 0x00);
+  sfx2.write(0x00303A, 0x1B);
+  sfxSetReg(sfx2, 0, 0x0081);
+  sfxSetReg(sfx2, 1, 0x0000);
+  sfxSetReg(sfx2, 2, 0x0000);
+  sfxSetReg(sfx2, 15, 0x0000);
+  sfx2.write(0x00301F, 0x00);
+  for (int i = 0; i < 20; i++) sfx2.stepGsu();
+  CHECK(sfx2.read(0x00700000) == 0x80); // bit0
+  CHECK(sfx2.read(0x00700031) == 0x80); // bit7 plane
+}
+
+TEST_CASE("superfx: BCS/BCC follow LSR carry") {
+  // R0=1: LSR -> CY=1,R0=0. BCS+2 taken -> R0=7 else 99.
+  auto run = [](uint16 r0init) {
+    SuperFx sfx;
+    std::vector<uint8> rom(0x10000, 0x01);
+    uint8 prog[] = {0x03, 0x0D, 0x04, 0x01, 0xA0, 0x63, 0x00, 0xA0, 0x07, 0x00};
+    for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+    sfx.setRom(rom, MapMode::lorom);
+    sfx.power();
+    sfx.write(0x00303A, 0x18);
+    sfxSetReg(sfx, 0, r0init);
+    sfxSetReg(sfx, 15, 0x0000);
+    sfx.write(0x00301F, 0x00);
+    for (int i = 0; i < 30; i++) sfx.stepGsu();
+    return sfxReg(sfx, 0);
+  };
+  CHECK(run(1) == 7);   // CY=1 -> BCS taken
+  CHECK(run(2) == 99);  // CY=0 -> BCS not taken (R0=1, then IBT 99)
+}
+
+TEST_CASE("superfx: BVS/BVC follow ADD overflow") {
+  // R0=0x4000,R1=0x4000: ADD -> 0x8000 S=1 OV=1. BVS taken.
+  auto run = [](uint8 branch, uint16 a, uint16 b) {
+    SuperFx sfx;
+    std::vector<uint8> rom(0x10000, 0x01);
+    // B0 FROM R0 | 51 ADD R1 | branch off | 01 NOP | A0 63 | 00 | A0 07 | 00
+    uint8 prog[] = {0xB0, 0x51, branch, 0x04, 0x01, 0xA0, 0x63, 0x00, 0xA0, 0x07, 0x00};
+    for (size_t i = 0; i < sizeof prog; i++) rom[i] = prog[i];
+    sfx.setRom(rom, MapMode::lorom);
+    sfx.power();
+    sfx.write(0x00303A, 0x18);
+    sfxSetReg(sfx, 0, a);
+    sfxSetReg(sfx, 1, b);
+    sfxSetReg(sfx, 15, 0x0000);
+    sfx.write(0x00301F, 0x00);
+    for (int i = 0; i < 30; i++) sfx.stepGsu();
+    return sfxReg(sfx, 0);
+  };
+  CHECK(run(0x0F, 0x4000, 0x4000) == 7);  // OV=1 -> BVS taken
+  CHECK(run(0x0E, 0x4000, 0x4000) == 99); // OV=1 -> BVC not taken
+  CHECK(run(0x0E, 0x0005, 0x0003) == 7);  // OV=0 -> BVC taken
+  CHECK(run(0x06, 0x0005, 0x0005) == 7);  // Z=1 S=OV=0 -> BGE taken
+  CHECK(run(0x0A, 0x0000, 0x0001) == 7);  // ADD 0+1=1 S=0 -> BPL taken
+  CHECK(run(0x0B, 0x0000, 0xFFFF) == 7);  // ADD 0+FFFF=FFFF S=1 -> BMI taken
 }

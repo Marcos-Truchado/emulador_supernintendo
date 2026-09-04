@@ -299,7 +299,7 @@ auto launcher(SDL_Renderer* renderer, SDL_Window* window, Gamepad& gamepad) -> s
       }
     }
     {
-      SDL_Texture* t = renderText(renderer, "En juego: V X - C Y - U L - I R - F5/F8 guardar/cargar - Mando: Ver+RB guardar - Ver+LB cargar - Ver+Menu volver",
+      SDL_Texture* t = renderText(renderer, "En juego: V X - C Y - U L - I R - Tab FF - F5/F8 guardar/cargar - Mando: Ver+RB guardar - Ver+LB cargar - Ver+Menu volver",
                                   kWhite.r, kWhite.g, kWhite.b, 1);
       if (t) {
         int w = 0, h = 0;
@@ -336,13 +336,14 @@ auto runGame(const std::string& romPath, SDL_Renderer* renderer, SDL_Window* win
   std::vector<snes::uint8> rgb(size_t(kWidth) * kHeight * 3);
   const std::string statePath = romPath + ".ss";
   bool running = true;
+  bool fastForward = false;  // Tab: 8 frames/tick, sin audio ni espera (cargas GSU)
   uint64_t lastRendered = system.renderedFrames();
 
   auto runFrame = [&] {
     const uint64_t target = lastRendered + 1;
     while (system.renderedFrames() < target) system.step();
     lastRendered = target;
-    if (audio) {
+    if (audio && !fastForward) {
       snes::int16 samples[2048];
       const size_t n = system.readAudio(samples, 2048);
       if (n > 0) SDL_QueueAudio(audio, samples, snes::uint32(n * sizeof(snes::int16)));
@@ -363,6 +364,10 @@ auto runGame(const std::string& romPath, SDL_Renderer* renderer, SDL_Window* win
         switch (ev.key.keysym.sym) {
           case SDLK_ESCAPE: return true;  // back to launcher
           case SDLK_F11: toggleFullscreen(window); break;
+          case SDLK_TAB:
+            fastForward = !fastForward;
+            if (audio) SDL_ClearQueuedAudio(audio);  // evita ráfaga al salir
+            break;
           case SDLK_F5: saveStateFile(system, statePath); break;
           case SDLK_F8: loadStateFile(system, statePath); break;
           default: break;
@@ -380,7 +385,8 @@ auto runGame(const std::string& romPath, SDL_Renderer* renderer, SDL_Window* win
 
     SDL_PumpEvents();
     system.setJoypad(0, readJoypad(SDL_GetKeyboardState(nullptr)) | gamepad.joypad());
-    runFrame();
+    const int framesPerTick = fastForward ? 8 : 1;
+    for (int f = 0; f < framesPerTick; f++) runFrame();
 
     for (int y = 0; y < kHeight; y++) {
       for (int x = 0; x < kWidth; x++) {
@@ -417,7 +423,7 @@ auto runGame(const std::string& romPath, SDL_Renderer* renderer, SDL_Window* win
     SDL_RenderPresent(renderer);
 
     const uint64_t elapsed = SDL_GetTicks64() - frameStart;
-    if (elapsed < 16) SDL_Delay(snes::uint32(16 - elapsed));
+    if (!fastForward && elapsed < 16) SDL_Delay(snes::uint32(16 - elapsed));
   }
 
   SDL_DestroyTexture(texture);
